@@ -1,7 +1,7 @@
 import { relations } from "drizzle-orm";
 import { pgTable, text, integer, pgEnum, uuid, timestamp } from "drizzle-orm/pg-core";
-import { createdAt, id, updatedAt } from "../schemaHelpers.js";
-import { UserCourseAccessTable } from "./userCourseAccess.js";
+import { createdAt, id, updatedAt } from "../schemaHelpers";
+import { UserCourseAccessTable } from "./userCourseAccess";
 
 // User roles => user(student), instructor, admin
 export const userRoles = ["user", "instructor", "admin"] as const;

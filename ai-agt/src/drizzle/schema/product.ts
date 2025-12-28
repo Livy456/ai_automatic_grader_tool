@@ -1,7 +1,7 @@
 import { relations } from "drizzle-orm";
 import { pgTable, text, integer, pgEnum } from "drizzle-orm/pg-core";
-import { id, createdAt, updatedAt } from "../schemaHelpers.js";
-import { CourseProductTable } from "./courseProduct.js";
+import { id, createdAt, updatedAt } from "../schemaHelpers";
+import { CourseProductTable } from "./courseProduct";
 
 export const productStatuses = ["private", "public"] as const;
 export type ProductStatus = (typeof productStatuses)[number];

@@ -1,9 +1,9 @@
 import { relations } from "drizzle-orm";
 import { pgTable, text, integer, pgEnum, uuid } from "drizzle-orm/pg-core";
-import { id, createdAt, updatedAt } from "../schemaHelpers.js";
-import { CourseTable } from "./course.js";
+import { id, createdAt, updatedAt } from "../schemaHelpers";
+import { CourseTable } from "./course";
 import { CourseSectionTable } from "./courseSection";
-import { UserLessonCompleteTable } from "./userLessonComplete.js";
+import { UserLessonCompleteTable } from "./userLessonComplete";
 
 export const lessonStatuses = ["private", "public", "preview"] as const;
 export type LessonStatus = (typeof lessonStatuses)[number];

@@ -1,6 +1,6 @@
 import { pgTable, primaryKey, uuid } from "drizzle-orm/pg-core"
 import { CourseTable } from "./course"
-import { createdAt, updatedAt } from "../schemaHelpers.js"
+import { createdAt, updatedAt } from "../schemaHelpers"
 import { relations } from "drizzle-orm/relations";
 import { ProductTable } from "./product";
 

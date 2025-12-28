@@ -1,6 +1,6 @@
 import { relations } from "drizzle-orm";
 import { pgTable, text } from "drizzle-orm/pg-core";
-import { id, createdAt, updatedAt } from "../schemaHelpers.js";
+import { id, createdAt, updatedAt } from "../schemaHelpers";
 import { CourseProductTable } from "./courseProduct.js";
 import {UserCourseAccessTable} from "./userCourseAccess.js";
 // import { uuid } from "zod";

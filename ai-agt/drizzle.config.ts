@@ -5,7 +5,7 @@ export default defineConfig({
     out: "./src/drizzle/migrations",
     schema: "./src/drizzle/schema.ts",
     dialect: "postgresql",
-    // strict and verbose are true to make drizzel to confirm with user all migrations, helps with security
+    // strict and verbose are true to make drizzle to confirm with user all migrations, helps with security
     strict:true,
     verbose:true,
 
