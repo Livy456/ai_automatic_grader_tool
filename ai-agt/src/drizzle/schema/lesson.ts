@@ -3,6 +3,7 @@ import { pgTable, text, integer, pgEnum, uuid } from "drizzle-orm/pg-core";
 import { id, createdAt, updatedAt } from "../schemaHelpers.js";
 import { CourseTable } from "./course.js";
 import { CourseSectionTable } from "./courseSection";
+import { UserLessonCompleteTable } from "./userLessonComplete.js";
 
 export const lessonStatuses = ["private", "public", "preview"] as const;
 export type LessonStatus = (typeof lessonStatuses)[number];
@@ -31,5 +32,6 @@ export const LessonRelationships = relations(
             fields: [LessonTable.sectionId],
             references: [CourseSectionTable.id],
         }),
+        UserLessonCompletes: many(UserLessonCompleteTable),
     })
 )
