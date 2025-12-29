@@ -1,6 +1,7 @@
 import type { Config } from 'tailwindcss';
 // import { extend } from 'zod/v4/mini';
 
+
 export default {
     content: [
         "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
@@ -22,5 +23,5 @@ export default {
              },
         },
     },
-    plugins: [],
+    plugins: [require("tailwindcss-animate")], // added this in to fix the globals.css issue
 } satisfies Config;
