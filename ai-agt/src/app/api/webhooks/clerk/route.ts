@@ -22,7 +22,7 @@ export async function POST( req: Request) {
     let event: WebhookEvent
 
     try{
-        event = wh.verify({
+        event = wh.verify(body, {
             "svix-id": svixId,
             "svix-timestamp": svixTimestamp,
             "svix-signature": svixSignature,
@@ -32,4 +32,3 @@ export async function POST( req: Request) {
         return new Response("Error occurred", { status: 400 })
     }
 }
-npm i svix
