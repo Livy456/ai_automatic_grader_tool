@@ -41,7 +41,6 @@ export async function updateUser(
 
 export async function deleteUser(
     {clerkUserId} : {clerkUserId: string}, 
-    data: Partial< typeof UserTable.$inferInsert>
 ) {
     // could be undefined, need to modify typescript config file => tsconfig.json
     const [deletedUser] = await db

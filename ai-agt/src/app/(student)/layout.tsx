@@ -1,7 +1,9 @@
 import { Button } from "@/components/ui/button";
+import { getCurrentUser } from "@/services/clerk";
 import { SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
 import Link from "next/link";
 import { ReactNode, Suspense } from "react";
+import { canAccessAdminPage } from "@/permissions/general";
 
 export default function StudentLayout({
     children
@@ -14,10 +16,6 @@ export default function StudentLayout({
     )
 }
 
-// function Navbar() {
-//   return <div className="p-4 bg-red-200">NAVBAR TEST</div>;
-// }
-
 function Navbar() {
     return (
         <header className="flex h-12 shadow 
@@ -29,9 +27,7 @@ function Navbar() {
                 </Link>
                 <Suspense>
                     <SignedIn>
-                        <Link className="hover:bg-accent/10 flex items-center px-2" href="/admin">
-                            Admin
-                        </Link>
+                        <AdminLink />
                         <Link className="hover:bg-accent/10 flex items-center px-2" href="/instructor">
                             Instructor
                         </Link>
@@ -62,5 +58,16 @@ function Navbar() {
                 </Suspense>
             </nav>
         </header>
+    )
+}
+
+async function AdminLink() {
+    const user = await getCurrentUser();
+    if(!canAccessAdminPage(user)) return null
+
+    return (
+        <Link className="hover:bg-accent/10 flex items-center px-2" href="/admin">
+            Admin
+        </Link>
     )
 }
