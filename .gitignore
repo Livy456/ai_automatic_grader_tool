@@ -64,3 +64,5 @@ drizzle/
 # docker exec -it ai_grader_ollama ollama pull llama3.2:3b
 
 __pycache__
+
+olivia_otes

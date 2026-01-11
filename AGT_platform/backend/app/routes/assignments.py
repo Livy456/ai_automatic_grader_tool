@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
-from extensions import SessionLocal
-from models import Assignment
-from rbac import require_auth, require_role
+from app.extensions import SessionLocal
+from app.models import Assignment
+from app.rbac import require_auth, require_role
 
 bp = Blueprint("assignments", __name__)
 

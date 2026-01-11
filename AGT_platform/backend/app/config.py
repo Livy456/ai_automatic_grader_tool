@@ -1,8 +1,13 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent.parent  # points to backend/
+load_dotenv(BASE_DIR / ".env")
 
 class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "dev_secret")
-    DATABASE_URL = os.getenv("DATABASE_URL")
+    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://dev:dev@localhost:5432/ai_grader")
     REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
     # S3 compatible storage

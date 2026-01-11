@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request
-from rbac import require_role
-from extensions import SessionLocal
-from models import User, AuditLog
+from app.rbac import require_role
+from app.extensions import SessionLocal
+from app.models import User, AuditLog
 
 bp = Blueprint("admin", __name__)
 

@@ -1,9 +1,9 @@
 from celery import Celery
-from config import Config
-from extensions import SessionLocal
-from models import Submission, Assignment, AIScore
-from storage import client
-from grading.pipelines import run_grading_pipeline
+from .config import Config
+from .extensions import SessionLocal
+from .models import Submission, Assignment, AIScore
+from .storage import client
+from .grading.pipelines import run_grading_pipeline
 
 celery_app = Celery(__name__)
 

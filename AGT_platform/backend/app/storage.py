@@ -1,5 +1,5 @@
 from minio import Minio
-from config import Config
+from .config import Config
 import uuid
 
 def client(cfg: Config):

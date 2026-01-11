@@ -1,8 +1,8 @@
 from flask import Blueprint, redirect, request, jsonify
 from authlib.integrations.flask_client import OAuth
 import jwt, os, time
-from extensions import SessionLocal
-from models import User
+from .extensions import SessionLocal
+from .models import User
 
 bp = Blueprint("auth", __name__)
 oauth = OAuth()

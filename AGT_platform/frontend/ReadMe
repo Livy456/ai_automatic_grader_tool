@@ -1,0 +1,13 @@
+Make sure you are in the frontend directory, then do the following steps to run the frontend
+
+1. Run the following command in your terminal to install dependencies:
+
+>> npm install
+
+2. Run the following command in your terminal to launch the app
+
+>> npm run dev
+
+3. Go to the following link to look at the app locally
+
+http://localhost:5173/

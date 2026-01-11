@@ -1,0 +1,11 @@
+Make sure you are in the backend directory
+
+1. Run the following command in the terminal to install packages used for the backend:
+
+>> pip install -r requirements.txt
+
+2. Run the following command in the terminal to run the backend:
+
+>> python -m app.main
+
+3. Access the backend information locally from this link
