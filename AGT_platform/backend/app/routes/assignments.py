@@ -1,3 +1,5 @@
+# OUTDATED VERSION OF MY ROUTES ASSIGNMENT!!!
+
 from flask import Blueprint, request, jsonify
 from app.extensions import SessionLocal
 from app.models import Assignment

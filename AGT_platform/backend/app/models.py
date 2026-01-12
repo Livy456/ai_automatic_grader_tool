@@ -1,9 +1,24 @@
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric, JSON, Index
 )
+
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .extensions import Base
+
+class Assignment(Base):
+    __tablename__ = "assignments"
+
+    id = Column(String, primary_key=True)  # uuid string
+    filename = Column(String, nullable=False)
+    storage_uri = Column(String, nullable=False)  # file://... or s3://... later
+    status = Column(String, nullable=False, default="uploaded")  # uploaded|grading|graded|failed
+
+    suggested_grade = Column(Integer, nullable=True)  # 0-100 (example)
+    feedback = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 class User(Base):
     __tablename__ = "users"
@@ -31,17 +46,17 @@ class Enrollment(Base):
 
 Index("ix_enroll_course_user", Enrollment.course_id, Enrollment.user_id, unique=True)
 
-class Assignment(Base):
-    __tablename__ = "assignments"
-    id = Column(Integer, primary_key=True)
-    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False)
-    title = Column(String, nullable=False)
-    description = Column(Text)
-    modality = Column(String, nullable=False)  # text|code|video
-    rubric = Column(JSON, nullable=False, default=list)  # list of criteria
-    created_at = Column(DateTime, default=datetime.utcnow)
+# class Assignment(Base):
+#     __tablename__ = "assignments"
+#     id = Column(Integer, primary_key=True)
+#     course_id = Column(Integer, ForeignKey("courses.id"), nullable=False)
+#     title = Column(String, nullable=False)
+#     description = Column(Text)
+#     modality = Column(String, nullable=False)  # text|code|video
+#     rubric = Column(JSON, nullable=False, default=list)  # list of criteria
+#     created_at = Column(DateTime, default=datetime.utcnow)
 
-    course = relationship("Course")
+#     course = relationship("Course")
 
 class Submission(Base):
     __tablename__ = "submissions"

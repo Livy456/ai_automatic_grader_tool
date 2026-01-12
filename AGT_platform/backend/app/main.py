@@ -10,9 +10,12 @@ from app.extensions import Base, init_db
 from .auth import bp as auth_bp, init_oauth
 from .tasks import init_celery
 from .routes.health import bp as health_bp
-from .routes.assignments import bp as assignments_bp
+# from .routes.assignments import bp as assignments_bp # OLD VERSION OF THE ASSIGNMENTS
 from .routes.submissions import bp as submissions_bp
 from .routes.admin import bp as admin_bp
+from .routes_assignments import bp as assignments_bp
+
+
 
 def create_app():
     app = Flask(__name__)
