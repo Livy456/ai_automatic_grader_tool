@@ -24,12 +24,12 @@ export default function AdminDashboard() {
   useEffect(() => { refresh(); }, []);
 
   const setRole = async (userId: number, role: string) => {
-    await api.post(`/admin/users/${userId}/role`, { role });
+    await api.post(`/admin/users/${userId}/role`, { role } as any);
     await refresh();
   };
 
   const createCourse = async () => {
-    await api.post("/admin/courses", { code: newCourseCode, title: newCourseTitle });
+    await api.post("/admin/courses", { code: newCourseCode, title: newCourseTitle } as any);
     setNewCourseCode(""); setNewCourseTitle("");
     await refresh();
   };

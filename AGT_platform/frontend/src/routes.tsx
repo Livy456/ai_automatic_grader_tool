@@ -1,23 +1,5 @@
-// import { createBrowserRouter } from "react-router-dom";
-// import Login from "./pages/Login";
-// import StudentDashboard from "./pages/StudentDashboard";
-// import AssignmentDetail from "./pages/AssignmentDetail";
-// import SubmissionUpload from "./pages/SubmissionUpload";
-// import SubmissionReview from "./pages/SubmissionReview";
-// import AssignmentsPage from "./pages/AssignmentsPage";
-
-// export const router = createBrowserRouter([
-//   { path: "/dashboard", element: <StudentDashboard /> },
-//   { path: "/assignments/:id", element: <AssignmentDetail /> },
-//   { path: "/assignments/:id/submit", element: <SubmissionUpload /> },
-//   { path: "/", element: <AssignmentsPage /> },
-//   { path: "/submissions/:id", element: <SubmissionReview /> },
-//   { path: "/login", element: <Login /> },
-  
-// ]);
 import { createBrowserRouter } from "react-router-dom";
 import App from "./App";
-
 import Login from "./pages/Login";
 import StudentDashboard from "./pages/StudentDashboard";
 import TeacherDashboard from "./pages/TeacherDashboard";
@@ -36,7 +18,7 @@ export const router = createBrowserRouter([
     children: [
       
       { path: "/", element: <StudentDashboard /> },
-      {path: "/assignment", element: <AssignmentsPage /> },
+      { path: "/assignment", element: <AssignmentsPage /> },
       { path: "/teacher", element: <TeacherDashboard /> },
       { path: "/admin", element: <AdminDashboard /> },
 

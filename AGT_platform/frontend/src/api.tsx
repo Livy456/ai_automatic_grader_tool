@@ -1,5 +1,13 @@
 /// <reference types="vite/client" />
+// src/api.tsx (or src/api.ts)
+import { getToken } from "./auth";
 
+function withAuthHeaders(extra?: HeadersInit): Headers {
+  const h = new Headers(extra ?? {});
+  const token = getToken();
+  if (token) h.set("Authorization", `Bearer ${token}`);
+  return h;
+}
 export type Assignment = {
   id: string;
   filename: string;
@@ -20,26 +28,33 @@ export const api = {
   async get(path: string) {
     const res = await fetch(`${API_BASE}${path}`, {
       method: "GET",
+      headers: withAuthHeaders(),
+      // credentials optional; keep if you want cookies too
       credentials: "include",
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`GET ${path} failed: ${res.status} ${text}`);
-    }
-    return res.json();
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(`GET ${path} failed: ${res.status} ${text}`);
+    return text ? JSON.parse(text) : null;
   },
 
   async post(path: string, body?: BodyInit) {
+    const headers = withAuthHeaders();
+
+    // If it's JSON string, declare content-type
+    if (typeof body === "string") headers.set("Content-Type", "application/json");
+    // If it's FormData, DO NOT set Content-Type (browser sets boundary)
+    if (body instanceof FormData) headers.delete("Content-Type");
+
     const res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
       body,
+      headers,
       credentials: "include",
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`POST ${path} failed: ${res.status} ${text}`);
-    }
-    return res.json();
+
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(`POST ${path} failed: ${res.status} ${text}`);
+    return text ? JSON.parse(text) : null;
   },
 };
 
