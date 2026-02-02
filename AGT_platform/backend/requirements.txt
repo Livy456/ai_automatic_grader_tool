@@ -17,3 +17,4 @@ minio==7.2.7
 nbformat==5.10.4
 pypdf==5.0.1
 psycopg2-binary==2.9.11
+jwt-decode
