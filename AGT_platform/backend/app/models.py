@@ -4,6 +4,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, DeclarativeBase
 from datetime import datetime
 import uuid
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 class Base(DeclarativeBase):
     pass
@@ -14,7 +15,7 @@ def now():
 class AssignmentUpload(Base):
     __tablename__ = "assignment_uploads"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     filename = Column(String(512), nullable=False)
     storage_uri = Column(Text, nullable=False)
     status = Column(String(32), nullable=False, default="uploaded")  # uploaded|grading|graded|error
@@ -36,20 +37,6 @@ class Assignment(Base):
     created_at = Column(DateTime)
 
     course = relationship("Course")
-
-# class Assignment(Base):
-#     __tablename__ = "assignments"
-
-#     id = Column(String, primary_key=True)  # uuid string
-#     filename = Column(String, nullable=False)
-#     storage_uri = Column(String, nullable=False)  # file://... or s3://... later
-#     status = Column(String, nullable=False, default="uploaded")  # uploaded|grading|graded|failed
-
-#     suggested_grade = Column(Integer, nullable=True)  # 0-100 (example)
-#     feedback = Column(Text, nullable=True)
-
-#     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-#     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 class User(Base):
     __tablename__ = "users"
@@ -76,18 +63,6 @@ class Enrollment(Base):
     user = relationship("User")
 
 Index("ix_enroll_course_user", Enrollment.course_id, Enrollment.user_id, unique=True)
-
-# class Assignment(Base):
-#     __tablename__ = "assignments"
-#     id = Column(Integer, primary_key=True)
-#     course_id = Column(Integer, ForeignKey("courses.id"), nullable=False)
-#     title = Column(String, nullable=False)
-#     description = Column(Text)
-#     modality = Column(String, nullable=False)  # text|code|video
-#     rubric = Column(JSON, nullable=False, default=list)  # list of criteria
-#     created_at = Column(DateTime, default=datetime.utcnow)
-
-#     course = relationship("Course")
 
 class Submission(Base):
     __tablename__ = "submissions"

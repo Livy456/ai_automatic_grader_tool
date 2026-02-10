@@ -27,3 +27,11 @@ Make sure you are in the backend directory
 7. Access the backend information locally from this link:
 
 >> INSERT LINK EVENTUALLY
+
+When migrating new tables to the database:
+
+python -m alembic current
+python -m alembic revision --autogenerate -m "create assignment_uploads"
+python -m alembic upgrade head
+
+alembic revision --autogenerate -m "create assignment_uploads"
