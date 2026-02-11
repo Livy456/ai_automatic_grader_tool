@@ -67,4 +67,11 @@ __pycache__
 
 olivia_notes.txt
 uploads
-.agt_venv
+
+# OAuth setup documentation (contains sensitive setup info)
+**/OAUTH_SETUP.md
+
+# Cloudflare deployment documentation (contains deployment details)
+**/CLOUDFLARE_DEPLOYMENT.md
+
+DIA_ai_scorer.pem

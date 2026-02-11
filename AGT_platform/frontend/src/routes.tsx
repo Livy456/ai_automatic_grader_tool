@@ -1,30 +1,65 @@
-import { createBrowserRouter } from "react-router-dom";
-import App from "./App";
+// src/routes.tsx
+import React from "react";
+import {
+  createBrowserRouter,
+  createRoutesFromElements,
+  Route,
+  Navigate,
+} from "react-router-dom";
+import { jwtDecode } from "jwt-decode";
 import Login from "./pages/Login";
 import StudentDashboard from "./pages/StudentDashboard";
 import TeacherDashboard from "./pages/TeacherDashboard";
 import AdminDashboard from "./pages/AdminDashboard";
-import AssignmentDetail from "./pages/AssignmentDetail";
-import SubmissionUpload from "./pages/SubmissionUpload";
-import SubmissionReview from "./pages/SubmissionReview";
-import AssignmentsPage from "./pages/AssignmentsPage";
+import { getToken } from "./auth";
 
-export const router = createBrowserRouter([
-  { path: "/login", element: <Login /> },
+interface JwtPayload {
+  role: string;
+  [key: string]: any;
+}
 
-  {
-    path: "/",
-    element: <App />,
-    children: [
-      
-      { path: "/", element: <StudentDashboard /> },
-      { path: "/assignment", element: <AssignmentsPage /> },
-      { path: "/teacher", element: <TeacherDashboard /> },
-      { path: "/admin", element: <AdminDashboard /> },
-
-      { path: "/assignments/:id", element: <AssignmentDetail /> },
-      { path: "/assignments/:id/submit", element: <SubmissionUpload /> },
-      { path: "/submissions/:id", element: <SubmissionReview /> },
-    ]
+function PrivateWrapper({ children }: { children: JSX.Element }) {
+  const token = getToken();
+  if (!token) {
+    return <Navigate to="/login" replace />;
   }
-]);
+  return children;
+}
+
+function RoleBasedDashboard() {
+  const token = getToken();
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
+  const { role } = jwtDecode<JwtPayload>(token) || {};
+  switch (role) {
+    case "admin":
+      return <AdminDashboard />;
+    case "teacher":
+      return <TeacherDashboard />;
+    default:
+      return <StudentDashboard />;
+  }
+}
+
+// Use createRoutesFromElements to define routes declaratively.
+const router = createBrowserRouter(
+  createRoutesFromElements(
+    <>
+      {/* Login route is public */}
+      <Route path="/login" element={<Login />} />
+      {/* All other routes go through PrivateWrapper and render the correct dashboard */}
+      <Route
+        path="/*"
+        element={
+          <PrivateWrapper>
+            <RoleBasedDashboard />
+          </PrivateWrapper>
+        }
+      />
+    </>
+  )
+);
+
+export default router;
+export { router };

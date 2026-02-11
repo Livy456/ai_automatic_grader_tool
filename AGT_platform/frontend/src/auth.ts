@@ -1,3 +1,4 @@
+// src/auth.ts
 export function getToken(): string | null {
   return localStorage.getItem("token");
 }
