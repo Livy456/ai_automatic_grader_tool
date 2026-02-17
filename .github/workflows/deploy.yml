@@ -16,20 +16,52 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate Required Secrets
+        run: |
+          if [ -z "${{ secrets.SERVER_HOST }}" ]; then
+            echo "❌ Error: SERVER_HOST secret is not set"
+            echo "Please go to: Settings → Secrets and variables → Actions"
+            echo "Add secret: SERVER_HOST = 54.234.41.63"
+            echo "Note: If using Elastic IP, use that IP instead"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SERVER_USER }}" ]; then
+            echo "❌ Error: SERVER_USER secret is not set"
+            echo "Please add secret: SERVER_USER = root (or your SSH username)"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SERVER_SSH_KEY }}" ]; then
+            echo "❌ Error: SERVER_SSH_KEY secret is not set"
+            echo "Please generate SSH key and add to secrets (see CLOUDFLARE_DEPLOYMENT.md section 7.3)"
+            exit 1
+          fi
+          echo "✅ All required secrets are set"
+
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          timeout: 30s
+          command_timeout: 10m
           script: |
-            cd /opt/ai-grader/AGT_platform
+            set -e  # Exit on error
+            cd /opt/ai-grader/AGT_platform || { echo "❌ Directory /opt/ai-grader/AGT_platform does not exist"; exit 1; }
+            echo "📦 Pulling latest code..."
             git pull origin main
+            echo "🐳 Pulling Docker images..."
             docker compose -f docker-compose.prod.yaml --env-file .env.production pull
+            echo "🔨 Building and starting containers..."
             docker compose -f docker-compose.prod.yaml --env-file .env.production up -d --build
+            echo "🤖 Pulling Ollama model (if needed)..."
             docker exec ai_grader_ollama_prod ollama pull llama3.2:3b || true
+            echo "📊 Running database migrations..."
             docker exec ai_grader_backend_prod alembic upgrade head || true
+            echo "🔄 Restarting services..."
             docker compose -f docker-compose.prod.yaml restart backend worker
+            echo "✅ Deployment complete!"
 
   deploy-frontend:
     name: Deploy Frontend to Cloudflare Pages
@@ -40,8 +72,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate Cloudflare Secrets
+        run: |
+          if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then
+            echo "⚠️  Warning: CLOUDFLARE_API_TOKEN secret is not set"
+            echo "Frontend deployment will be skipped"
+            echo "To enable: Add CLOUDFLARE_API_TOKEN secret (see CLOUDFLARE_DEPLOYMENT.md section 7.2)"
+          fi
+          if [ -z "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then
+            echo "⚠️  Warning: CLOUDFLARE_ACCOUNT_ID secret is not set"
+            echo "Frontend deployment will be skipped"
+            echo "To enable: Add CLOUDFLARE_ACCOUNT_ID secret"
+          fi
+
       - name: Deploy to Cloudflare Pages
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
         uses: cloudflare/pages-action@v1
+        continue-on-error: true
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -49,3 +96,14 @@ jobs:
           directory: AGT_platform/frontend
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
           wranglerVersion: '3'
+
+      - name: Skip Frontend Deployment (if secrets missing)
+        if: ${{ secrets.CLOUDFLARE_API_TOKEN == '' || secrets.CLOUDFLARE_ACCOUNT_ID == '' }}
+        run: |
+          echo "⏭️  Skipping frontend deployment - Cloudflare secrets not configured"
+          echo "This is optional. Backend deployment will continue."
+          echo ""
+          echo "To enable frontend deployment:"
+          echo "1. Add CLOUDFLARE_API_TOKEN secret"
+          echo "2. Add CLOUDFLARE_ACCOUNT_ID secret"
+          echo "See CLOUDFLARE_DEPLOYMENT.md section 7.2 for details"

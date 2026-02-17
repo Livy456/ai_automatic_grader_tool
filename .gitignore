@@ -69,9 +69,17 @@ olivia_notes.txt
 uploads
 
 # OAuth setup documentation (contains sensitive setup info)
-**/OAUTH_SETUP.md
-
-# Cloudflare deployment documentation (contains deployment details)
-**/CLOUDFLARE_DEPLOYMENT.md
 
 DIA_ai_scorer.pem
+
+**/SECRETS_SETUP.md
+**/SSH_KEY_SETUP.md
+**/EC2_SSH_GUIDE.md
+**/CLOUDFLARE_DEPLOYMENT.md
+**/OAUTH_SETUP.md
+**/CURSOR_REMOTE_SSH_SETUP.md
+**/EC2_SSH_TROUBLESHOOTING.md
+**/EC2_IP_UPDATE.md
+**/SSH_CONNECTION_DEBUG.md
+**/SSH_KEY_AUTHENTICATION_FIX.md
+**/
