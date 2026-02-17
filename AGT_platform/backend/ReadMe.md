@@ -35,3 +35,5 @@ python -m alembic revision --autogenerate -m "create assignment_uploads"
 python -m alembic upgrade head
 
 alembic revision --autogenerate -m "create assignment_uploads"
+
+THIS IS THE OLD VERSION OF THE AUTOGRADER!!
