@@ -51,6 +51,9 @@ services:
     container_name: ai_grader_backend
     env_file: .env
     environment:
+      # Must match postgres service above. Re-read from project .env on each `compose up` (recreate container if URL changed).
+      DATABASE_URL: "${DATABASE_URL:-postgresql://dev:dev@postgres:5432/ai_grader}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
       # Defaults match MinIO + createbuckets; set S3_* in .env (Compose substitutes from project .env).
       S3_ENDPOINT: "${S3_ENDPOINT:-http://minio:9000}"
       S3_ACCESS_KEY: "${S3_ACCESS_KEY:-minio}"
@@ -60,6 +63,7 @@ services:
       S3_SECURE: "${S3_SECURE:-false}"
       S3_ADDRESSING_STYLE: "${S3_ADDRESSING_STYLE:-path}"
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-1024}"
+      ALLOW_FLASK_MULTIPART_UPLOAD: "${ALLOW_FLASK_MULTIPART_UPLOAD:-true}"
     ports: ["5000:5000"]
     depends_on: [postgres, redis, minio, createbuckets, ollama]
 
@@ -68,6 +72,8 @@ services:
     container_name: ai_grader_worker
     env_file: .env
     environment:
+      DATABASE_URL: "${DATABASE_URL:-postgresql://dev:dev@postgres:5432/ai_grader}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
       S3_ENDPOINT: "${S3_ENDPOINT:-http://minio:9000}"
       S3_ACCESS_KEY: "${S3_ACCESS_KEY:-minio}"
       S3_SECRET_KEY: "${S3_SECRET_KEY:-minio123456}"
@@ -76,7 +82,8 @@ services:
       S3_SECURE: "${S3_SECURE:-false}"
       S3_ADDRESSING_STYLE: "${S3_ADDRESSING_STYLE:-path}"
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-1024}"
-    command: celery -A app.tasks.celery_app worker --loglevel=INFO -Q gpu,celery
+      ALLOW_FLASK_MULTIPART_UPLOAD: "${ALLOW_FLASK_MULTIPART_UPLOAD:-true}"
+    command: celery -A app.tasks.celery_app worker --loglevel=INFO -Q gpu,celery --concurrency=1 --prefetch-multiplier=1
     depends_on: [backend, redis, postgres, minio, ollama]
 
   frontend:

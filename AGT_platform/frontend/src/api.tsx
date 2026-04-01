@@ -1,5 +1,4 @@
 /// <reference types="vite/client" />
-// src/api.tsx (or src/api.ts)
 import { getToken } from "./auth";
 
 function withAuthHeaders(extra?: HeadersInit): Headers {
@@ -8,6 +7,7 @@ function withAuthHeaders(extra?: HeadersInit): Headers {
   if (token) h.set("Authorization", `Bearer ${token}`);
   return h;
 }
+
 export type Assignment = {
   id: string;
   filename: string;
@@ -21,15 +21,71 @@ export type Assignment = {
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 /**
- * api: simple wrapper used by dashboards.
- * Usage: api.get("/api/assignments"), api.post("/api/assignments", formData)
+ * Browser → S3 (presigned PUT). Do not send auth headers; signature embeds access.
  */
+export async function putToPresignedUrl(
+  url: string,
+  body: Blob,
+  contentType: string
+): Promise<void> {
+  const res = await fetch(url, {
+    method: "PUT",
+    body,
+    headers: { "Content-Type": contentType },
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`S3 PUT failed: ${res.status} ${t}`);
+  }
+}
+
+export type DirectUploadStartResponse = {
+  submission_id: number;
+  status: string;
+  uploads: Array<{
+    artifact_id: number;
+    s3_key: string;
+    upload_url: string;
+    content_type: string;
+  }>;
+};
+
+/**
+ * Presigned flow: start → PUT each file to S3 → finalize. Keeps large files off the API EC2.
+ */
+export async function submitAssignmentDirect(
+  assignmentId: number,
+  files: File[],
+  onProgress?: (fileIndex: number, fraction: number) => void
+): Promise<{ submission_id: number; status: string }> {
+  const start = (await api.post("/api/submissions/direct-upload/start", {
+    assignment_id: assignmentId,
+    files: files.map((f) => ({
+      filename: f.name,
+      content_type: f.type || "application/octet-stream",
+    })),
+  })) as DirectUploadStartResponse;
+
+  for (let i = 0; i < start.uploads.length; i++) {
+    const u = start.uploads[i];
+    const file = files[i];
+    if (!file) continue;
+    await putToPresignedUrl(u.upload_url, file, u.content_type);
+    onProgress?.(i, 1);
+  }
+
+  const done = (await api.post(`/api/submissions/${start.submission_id}/finalize`, {})) as {
+    submission_id: number;
+    status: string;
+  };
+  return done;
+}
+
 export const api = {
   async get(path: string) {
     const res = await fetch(`${API_BASE}${path}`, {
       method: "GET",
       headers: withAuthHeaders(),
-      // credentials optional; keep if you want cookies too
       credentials: "include",
     });
     const text = await res.text().catch(() => "");
@@ -37,17 +93,21 @@ export const api = {
     return text ? JSON.parse(text) : null;
   },
 
-  async post(path: string, body?: BodyInit) {
+  async post(path: string, body?: BodyInit | object) {
     const headers = withAuthHeaders();
-
-    // If it's JSON string, declare content-type
-    if (typeof body === "string") headers.set("Content-Type", "application/json");
-    // If it's FormData, DO NOT set Content-Type (browser sets boundary)
-    if (body instanceof FormData) headers.delete("Content-Type");
+    let payload: BodyInit | undefined;
+    if (body !== undefined && body !== null && typeof body === "object" && !(body instanceof FormData)) {
+      payload = JSON.stringify(body);
+      headers.set("Content-Type", "application/json");
+    } else {
+      payload = body as BodyInit;
+      if (typeof body === "string") headers.set("Content-Type", "application/json");
+      if (body instanceof FormData) headers.delete("Content-Type");
+    }
 
     const res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
-      body,
+      body: payload,
       headers,
       credentials: "include",
     });
@@ -58,7 +118,6 @@ export const api = {
   },
 };
 
-// Convenience functions (optional, nice for pages)
 export async function listAssignments(): Promise<Assignment[]> {
   return api.get("/api/assignments");
 }

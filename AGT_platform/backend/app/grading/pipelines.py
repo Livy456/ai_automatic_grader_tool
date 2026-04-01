@@ -1,11 +1,20 @@
-from .agent import OllamaClient, plan, grade
+from .agent import plan, grade
+from .llm_router import (
+    maybe_escalate_grade,
+    openai_client_if_configured,
+    primary_ollama_client,
+)
 from .tools import extract_text_from_pdf, extract_from_ipynb, run_python_tests, transcribe_video_stub
+
 
 def run_grading_pipeline(cfg, assignment, artifacts_bytes: dict):
     """
     artifacts_bytes: {kind: bytes}
+
+    Heavy inference runs on GPU workers (Ollama). OpenAI is optional server-side escalation.
     """
-    client = OllamaClient(cfg.OLLAMA_BASE_URL, cfg.OLLAMA_MODEL)
+    client = primary_ollama_client(cfg)
+    secondary = openai_client_if_configured(cfg)
     p = plan(client, assignment.modality)
 
     ctx = {"modality": assignment.modality, "artifacts": {}, "tool_results": {}}
@@ -37,6 +46,19 @@ def run_grading_pipeline(cfg, assignment, artifacts_bytes: dict):
         client=client,
         rubric=assignment.rubric,
         assignment_prompt=assignment.description or assignment.title,
-        submission_context=ctx
+        submission_context=ctx,
     )
+    result = maybe_escalate_grade(
+        cfg,
+        client,
+        secondary,
+        assignment.rubric,
+        assignment.description or assignment.title,
+        ctx,
+        result,
+    )
+    if result.get("_used_openai_arbitration"):
+        result["_model_used"] = f"openai:{cfg.OPENAI_MODEL}"
+    else:
+        result["_model_used"] = f"ollama:{cfg.OLLAMA_MODEL}"
     return result

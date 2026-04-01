@@ -1,5 +1,5 @@
-# Legacy: single EC2 runs API + data + Ollama + worker. For ALB + split GPU tier, use
-# docker-compose.web.prod.yaml and docker-compose.gpu.prod.yaml (see WEBSITE_INFRASTRUCTURE.md).
+# Web / App EC2 — same as docker-compose.web.prod.yaml (kept for workflows using -f docker-compose.prod.yaml).
+# Ollama and GPU Celery workers belong on docker-compose.gpu.prod.yaml only.
 
 services:
   postgres:
@@ -24,6 +24,8 @@ services:
     restart: unless-stopped
     volumes:
       - redisdata_prod:/data
+    ports:
+      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -59,25 +61,19 @@ services:
       exit 0;
       "
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ai_grader_ollama_prod
-    volumes:
-      - ollamadata_prod:/root/.ollama
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          memory: 2G
-
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: ai_grader_backend_prod
     env_file: .env.production
+    environment:
+      DATABASE_URL: "${DATABASE_URL}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
+      ALLOW_FLASK_MULTIPART_UPLOAD: "${ALLOW_FLASK_MULTIPART_UPLOAD:-false}"
+      DEPLOYMENT_TIER: web
     ports:
-      - "127.0.0.1:5000:5000"  # Localhost only (Cloudflare Tunnel). For ALB use docker-compose.web.prod.yaml (0.0.0.0:5000).
+      - "0.0.0.0:5000:5000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,33 +81,16 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      ollama:
-        condition: service_started
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
     command: python -m app.main
-
-  worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: ai_grader_worker_prod
-    env_file: .env.production
-    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=2 -Q gpu,celery
-    depends_on:
-      backend:
-        condition: service_started
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      ollama:
-        condition: service_started
-    restart: unless-stopped
 
 volumes:
   pgdata_prod:
   redisdata_prod:
   miniodata_prod:
-  ollamadata_prod:

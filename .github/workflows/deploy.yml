@@ -7,8 +7,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy-backend:
-    name: Deploy backend (monolith or web tier)
+  # --- Web / App EC2: Flask API, Postgres, Redis broker, MinIO/S3-sidecar (or point to AWS S3). ---
+  # No Ollama and no GPU Celery workers on this host. Migrations run here.
+  deploy-web:
+    name: Deploy web / app tier
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
 
@@ -32,7 +34,7 @@ jobs:
           fi
           echo "✅ Web server SSH secrets are set"
 
-      - name: Deploy to server
+      - name: Deploy web stack to SERVER_HOST
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -47,43 +49,38 @@ jobs:
             git pull origin main
             STACK='${{ secrets.DEPLOY_STACK }}'
             if [ -z "$STACK" ]; then STACK=monolith; fi
-            echo "📦 Deploy stack: $STACK"
+            echo "📦 Deploy stack mode: $STACK"
 
             if [ "$STACK" = "split" ]; then
-              echo "🐳 Web tier (docker-compose.web.prod.yaml)…"
-              docker compose -f docker-compose.web.prod.yaml --env-file .env.production pull
-              docker compose -f docker-compose.web.prod.yaml --env-file .env.production up -d --build
-              echo "⏳ Waiting for services…"
-              sleep 10
-              echo "📊 Database migrations…"
-              docker exec ai_grader_backend_prod alembic upgrade head || true
-              docker compose -f docker-compose.web.prod.yaml restart backend
+              COMPOSE_FILE=docker-compose.web.prod.yaml
             else
-              echo "🐳 Monolith (docker-compose.prod.yaml)…"
-              docker compose -f docker-compose.prod.yaml --env-file .env.production pull
-              docker compose -f docker-compose.prod.yaml --env-file .env.production up -d --build
-              sleep 10
-              echo "🤖 Ollama model pull…"
-              docker exec ai_grader_ollama_prod ollama pull llama3.2:3b || true
-              echo "📊 Database migrations…"
-              docker exec ai_grader_backend_prod alembic upgrade head || true
-              docker compose -f docker-compose.prod.yaml restart backend worker
+              COMPOSE_FILE=docker-compose.prod.yaml
             fi
-            echo "✅ Backend deploy complete"
 
+            echo "🐳 Web tier ($COMPOSE_FILE) — no Ollama / no GPU workers on this host"
+            docker compose -f "$COMPOSE_FILE" --env-file .env.production pull
+            docker compose -f "$COMPOSE_FILE" --env-file .env.production up -d --build
+            echo "⏳ Waiting for backend…"
+            sleep 12
+            echo "📊 Database migrations (backend container on web tier)…"
+            docker exec ai_grader_backend_prod python -m alembic upgrade head || true
+            docker compose -f "$COMPOSE_FILE" --env-file .env.production restart backend
+            echo "✅ Web / app deploy complete"
+
+  # --- GPU EC2: Ollama + Celery worker only. Private subnet; pull models here only. ---
   deploy-gpu:
     name: Deploy GPU inference tier
     runs-on: ubuntu-latest
     if: |
       github.ref == 'refs/heads/main' &&
       secrets.DEPLOY_STACK == 'split' &&
-      secrets.GPU_SERVER_HOST
+      secrets.GPU_SERVER_HOST != ''
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Deploy GPU stack
+      - name: Deploy GPU stack to GPU_SERVER_HOST
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.GPU_SERVER_HOST }}
@@ -91,18 +88,18 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22
           timeout: 60s
-          command_timeout: 25m
+          command_timeout: 30m
           script: |
             set -e
             cd /opt/ai-grader/AGT_platform || { echo "❌ Missing /opt/ai-grader/AGT_platform"; exit 1; }
             git pull origin main
-            echo "🐳 GPU tier (docker-compose.gpu.prod.yaml)…"
+            echo "🐳 GPU tier (docker-compose.gpu.prod.yaml) — Ollama + worker only"
             docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu pull
             docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu up -d --build
-            sleep 8
-            echo "🤖 Ollama model pull…"
+            sleep 10
+            echo "🤖 Ollama model pull on GPU host (match OLLAMA_MODEL in .env.production.gpu)…"
             docker exec ai_grader_ollama_prod ollama pull llama3.2:3b || true
-            docker compose -f docker-compose.gpu.prod.yaml restart worker
+            docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu restart worker
             echo "✅ GPU deploy complete"
 
   deploy-frontend:
@@ -139,4 +136,4 @@ jobs:
 
       - name: Skip Frontend Deployment (if secrets missing)
         if: steps.check-secrets.outputs.secrets_available != 'true'
-        run: echo "⏭️ Skipping Cloudflare Pages (secrets not set). Set VITE_API_BASE in Pages to https://api.dia-ai-grader.com when using split + ALB."
+        run: echo "⏭️ Skipping Cloudflare Pages (secrets not set). Set VITE_API_BASE in Pages build env."

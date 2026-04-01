@@ -1,6 +1,6 @@
-# Web / app tier: API (ALB target), Postgres, Redis, MinIO — no Ollama.
-# See WEBSITE_INFRASTRUCTURE.md. Bind backend to all interfaces for ALB → HTTP :5000.
-# Postgres/Redis/MinIO ports are published for the private GPU host (restrict with security groups).
+# Web / App EC2 only — public API, auth, presigned S3 orchestration, DB migrations.
+# Do NOT add Ollama or GPU grading workers here (keeps RAM for gunicorn/Flask + Redis broker).
+# GPU tier: docker-compose.gpu.prod.yaml on a private GPU instance.
 
 services:
   postgres:
@@ -10,8 +10,6 @@ services:
       POSTGRES_USER: ${DB_USER:-ai_grader}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME:-ai_grader}
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata_prod:/var/lib/postgresql/data
     restart: unless-stopped
@@ -24,11 +22,11 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ai_grader_redis_prod
-    ports:
-      - "6379:6379"
     restart: unless-stopped
     volumes:
       - redisdata_prod:/data
+    ports:
+      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -42,9 +40,6 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
     volumes:
       - miniodata_prod:/data
     restart: unless-stopped
@@ -73,6 +68,11 @@ services:
       dockerfile: Dockerfile
     container_name: ai_grader_backend_prod
     env_file: .env.production
+    environment:
+      DATABASE_URL: "${DATABASE_URL}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
+      ALLOW_FLASK_MULTIPART_UPLOAD: "${ALLOW_FLASK_MULTIPART_UPLOAD:-false}"
+      DEPLOYMENT_TIER: web
     ports:
       - "0.0.0.0:5000:5000"
     depends_on:
@@ -83,6 +83,12 @@ services:
       minio:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
     command: python -m app.main
 
 volumes:

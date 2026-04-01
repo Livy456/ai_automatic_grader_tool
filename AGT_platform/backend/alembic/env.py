@@ -5,11 +5,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy import engine_from_config, pool
 from alembic import context
-from app.models import Base
 
+# Load local .env only when DATABASE_URL is not already set (Docker Compose injects it).
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(_BACKEND_DIR / ".env.local")
-load_dotenv(_BACKEND_DIR / ".env", override=True)
+if not (os.getenv("DATABASE_URL") or "").strip():
+    load_dotenv(_BACKEND_DIR / ".env.local")
+    load_dotenv(_BACKEND_DIR / ".env", override=True)
+
+from app.models import Base
 
 
 # this is the Alembic Config object, which provides

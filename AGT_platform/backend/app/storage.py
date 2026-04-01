@@ -14,6 +14,7 @@ from typing import BinaryIO, Optional
 
 import boto3
 from botocore.client import Config as BotoClientConfig
+from botocore.exceptions import ClientError
 from boto3.s3.transfer import TransferConfig
 
 from .config import Config
@@ -37,7 +38,7 @@ def _addressing_style(cfg: Config) -> str:
 def s3_client(cfg: Config):
     """Low-level boto3 S3 client (AWS or MinIO)."""
     kwargs: dict = {
-        "region_name": cfg.S3_REGION or "us-east-1",
+        "region_name": cfg.AWS_REGION or cfg.S3_REGION or "us-east-1",
         "config": BotoClientConfig(
             signature_version="s3v4",
             s3={"addressing_style": _addressing_style(cfg)},
@@ -138,3 +139,40 @@ def get_presigned_url(cfg: Config, key: str, method: str = "GET", expires: int =
             ExpiresIn=expires,
         )
     raise ValueError(f"unsupported presign method: {method}")
+
+
+def presigned_put_url(
+    cfg: Config,
+    key: str,
+    content_type: str,
+    expires: Optional[int] = None,
+) -> str:
+    """
+    Browser → S3 direct upload. Client must send the same Content-Type header on PUT.
+    Keeps large files off the Flask host (production ingress is metadata + presign only).
+    """
+    exp = expires if expires is not None else cfg.S3_PRESIGN_PUT_EXPIRES
+    client = s3_client(cfg)
+    ct = content_type or "application/octet-stream"
+    return client.generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket": cfg.S3_BUCKET,
+            "Key": key,
+            "ContentType": ct,
+        },
+        ExpiresIn=exp,
+        HttpMethod="PUT",
+    )
+
+
+def object_exists(cfg: Config, key: str) -> bool:
+    """Return True if object is present (used to finalize direct uploads)."""
+    try:
+        s3_client(cfg).head_object(Bucket=cfg.S3_BUCKET, Key=key)
+        return True
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchKey", "NotFound", "404 Not Found"):
+            return False
+        raise

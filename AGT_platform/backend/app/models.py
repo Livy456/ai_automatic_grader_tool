@@ -101,14 +101,26 @@ class Enrollment(Base):
 Index("ix_enroll_course_user", Enrollment.course_id, Enrollment.user_id, unique=True)
 
 class Submission(Base):
+    """
+    Lifecycle (status):
+      uploading → uploaded → queued → grading → graded | needs_review | error
+    Direct S3 flow: create as uploading; after browser PUTs to S3, finalize sets uploaded,
+    then atomically queued + single Celery enqueue (grading_dispatch_at set once).
+    """
+
     __tablename__ = "submissions"
     id = Column(Integer, primary_key=True)
     assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=False)
     student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    status = Column(String, default="queued")  # queued|grading|graded|needs_review|error
+    status = Column(String(32), nullable=False, default="uploading")
     created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
-    final_score = Column(Numeric(5,2))
+    # Set once when grade_submission.delay succeeds — idempotent finalize / enqueue.
+    grading_dispatch_at = Column(DateTime, nullable=True)
+    grading_celery_task_id = Column(String(128), nullable=True)
+
+    final_score = Column(Numeric(5, 2))
     final_feedback = Column(Text)
 
     assignment = relationship("Assignment")

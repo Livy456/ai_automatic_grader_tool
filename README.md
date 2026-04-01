@@ -4,6 +4,8 @@ Monorepo for the **AGT platform**: a React (Vite) frontend, Flask API + Celery w
 
 Application code lives under **`AGT_platform/`**.
 
+**Production (two-EC2, direct S3 uploads, GPU workers):** see **[`docs/production_architecture_redesign.md`](docs/production_architecture_redesign.md)**.
+
 ---
 
 ## Prerequisites
@@ -17,7 +19,7 @@ Application code lives under **`AGT_platform/`**.
 
 ## Quick start: Docker (full stack)
 
-All Compose commands are run from **`AGT_platform/`** (where `docker-compose.yaml` is).
+All Compose commands are run from **`AGT_platform/`** (where `docker-compose.yaml` is). For a Docker Desktop–focused walkthrough (install, UI, troubleshooting), see **[`AGT_platform/DOCKER_DESKTOP.md`](AGT_platform/DOCKER_DESKTOP.md)**.
 
 ### 1. Create environment file
 

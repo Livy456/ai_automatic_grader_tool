@@ -94,6 +94,9 @@ DIA_ai_scorer.pem
 **/S3_BUCKET_SETUP.md
 **/WEBSITE_INFRASTRUCTURE.md
 **/USER_AND_JWT_SETUP.md
+**/AGT_LOCAL_AND_PRODUCTION_RUNBOOK.md
+**/AGT_platform/DOCKER_DESKTOP.md
+**/docs/production_architecture_redesign.md
 
 # environment variables file for GPU host
 env.production.gpu

@@ -12,6 +12,7 @@ celery==5.4.0
 redis==5.0.8
 
 boto3==1.35.36
+openai==1.55.3
 
 nbformat==5.10.4
 pypdf==5.0.1

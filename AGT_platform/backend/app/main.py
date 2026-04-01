@@ -23,7 +23,11 @@ def create_app():
     app.config.from_object(Config)
     app.config_obj = Config()  # for celery task access
     _cfg = Config()
-    app.config["MAX_CONTENT_LENGTH"] = _cfg.MAX_UPLOAD_BYTES
+    # Production: keep API bodies small (JSON + presign metadata only). Large files go to S3.
+    if _cfg.ALLOW_FLASK_MULTIPART_UPLOAD:
+        app.config["MAX_CONTENT_LENGTH"] = _cfg.MAX_UPLOAD_BYTES
+    else:
+        app.config["MAX_CONTENT_LENGTH"] = _cfg.WEB_MAX_BODY_BYTES
     
     # Flask session cookie: used only for OAuth (Authlib) state/CSRF during provider redirects.
     # Authenticated API access uses Authorization: Bearer <JWT>, not session cookies.
