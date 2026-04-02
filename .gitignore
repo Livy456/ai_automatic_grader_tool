@@ -100,6 +100,7 @@ DIA_ai_scorer.pem
 **/docs/AZURE_AI_GRADER_WEBSITE_SETUP.md
 **/docs/AZURE_ENTRA_TENANT_AND_GUEST_ACCESS.md
 **/BUG_REPORT.md
+**/docs/role_assignment.md
 
 # environment variables file for GPU host
 env.production.gpu

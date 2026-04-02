@@ -1,90 +1,145 @@
-import { useEffect, useState } from "react";
-import { api } from "../api";
-import { Box, Button, Container, TextField, Typography, Dialog, DialogTitle, DialogContent, DialogActions } from "@mui/material";
-import DataTable from "../components/DataTable";
+import { useCallback, useEffect, useState } from "react";
+import {
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  Typography,
+} from "@mui/material";
+import AddOutlined from "@mui/icons-material/AddOutlined";
+import { listCourseAssignments, listCourses, type CourseListItem } from "../api";
+import AssignmentForm from "../components/AssignmentForm";
+import StatCard from "../components/StatCard";
+import TeacherSubmissionsGrid from "../components/TeacherSubmissionsGrid";
+
+type TeacherCourse = CourseListItem & { assignmentCount: number };
 
 export default function TeacherDashboard() {
-  const [subs, setSubs] = useState<any[]>([]);
-  const [selected, setSelected] = useState<any | null>(null);
-  const [overrideScore, setOverrideScore] = useState<string>("");
+  const [courses, setCourses] = useState<TeacherCourse[]>([]);
+  const [dialogCourseId, setDialogCourseId] = useState<number | null>(null);
 
-  const refresh = async () => {
-    const r = await api.get("/teacher/submissions?limit=50");
-    setSubs(r.data);
-  };
+  const loadCourses = useCallback(async () => {
+    try {
+      const all = await listCourses();
+      const teacherRows = (Array.isArray(all) ? all : []).filter(
+        (c) => c.enrollment_role === "teacher",
+      );
+      const enriched = await Promise.all(
+        teacherRows.map(async (c) => {
+          try {
+            const assigns = await listCourseAssignments(c.id);
+            return {
+              ...c,
+              assignmentCount: Array.isArray(assigns) ? assigns.length : 0,
+            };
+          } catch {
+            return { ...c, assignmentCount: 0 };
+          }
+        }),
+      );
+      setCourses(enriched);
+    } catch {
+      setCourses([]);
+    }
+  }, []);
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    void loadCourses();
+  }, [loadCourses]);
 
-  const openSubmission = async (row: any) => {
-    const r = await api.get(`/submissions/${row.id}`);
-    setSelected(r.data);
-    setOverrideScore(String(r.data.final_score ?? ""));
-  };
-
-  const saveOverride = async () => {
-    if (!selected) return;
-    await api.post(`/teacher/submissions/${selected.id}/override`, {
-      final_score: Number(overrideScore),
-      final_feedback: selected.final_feedback ?? ""
-    });
-    await refresh();
-    setSelected(null);
-  };
+  const dialogCourse = courses.find((c) => c.id === dialogCourseId);
 
   return (
-    <Container>
-      <Typography variant="h5" gutterBottom>Teacher Dashboard</Typography>
-      <Typography sx={{ mb: 2 }}>Recent submissions queue.</Typography>
-
-      <DataTable
-        columns={[
-          { key: "id", label: "Submission ID" },
-          { key: "assignment_id", label: "Assignment" },
-          { key: "student_id", label: "Student" },
-          { key: "status", label: "Status" },
-          { key: "final_score", label: "Score" },
-          { key: "created_at", label: "Created" }
-        ]}
-        rows={subs}
-        onRowClick={openSubmission}
-      />
-
-      <Box sx={{ mt: 2 }}>
-        <Button variant="outlined" onClick={refresh}>Refresh</Button>
+    <Box>
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "1fr", sm: "repeat(3, 1fr)" },
+          gap: 2,
+          mb: 3,
+        }}
+      >
+        <StatCard title="Courses" value="—" subtitle="LTI sync pending" aria-label="Courses count" />
+        <StatCard title="Total Submissions" value="—" aria-label="Total submissions" />
+        <StatCard title="Pending Review" value="—" aria-label="Pending review count" />
       </Box>
 
-      <Dialog open={!!selected} onClose={() => setSelected(null)} maxWidth="md" fullWidth>
-        <DialogTitle>Review Submission</DialogTitle>
-        <DialogContent>
-          {selected && (
-            <>
-              <Typography sx={{ mb: 1 }}>Status: {selected.status}</Typography>
-              <Typography sx={{ mb: 1 }}>Suggested Score: {selected.final_score ?? "—"}</Typography>
-
-              <Typography variant="h6" sx={{ mt: 2 }}>AI Criteria</Typography>
-              {(selected.ai_scores || []).map((s: any, i: number) => (
-                <Box key={i} sx={{ mt: 1, p: 1, border: "1px solid #eee", borderRadius: 1 }}>
-                  <Typography><b>{s.criterion}</b> — {s.score} (conf {s.confidence})</Typography>
-                  <Typography>{s.rationale}</Typography>
+      <Typography variant="h3" sx={{ mb: 2 }}>
+        My Courses
+      </Typography>
+      {courses.length === 0 ? (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+          No courses where you are listed as a teacher. Ask an admin to enroll you as a teacher on a course.
+        </Typography>
+      ) : (
+        <Box
+          sx={{
+            display: "grid",
+            gridTemplateColumns: { xs: "1fr", md: "repeat(2, 1fr)" },
+            gap: 2,
+            mb: 3,
+          }}
+        >
+          {courses.map((course) => (
+            <Card key={course.id}>
+              <CardContent>
+                <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 1, mb: 1 }}>
+                  <Chip label={course.code} size="small" color="secondary" variant="outlined" />
+                  <Typography variant="h3" component="h2">
+                    {course.title}
+                  </Typography>
                 </Box>
-              ))}
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  You are a teacher · {course.assignmentCount} assignment
+                  {course.assignmentCount === 1 ? "" : "s"}
+                </Typography>
+                <Button
+                  variant="contained"
+                  color="secondary"
+                  startIcon={<AddOutlined />}
+                  onClick={() => setDialogCourseId(course.id)}
+                  aria-label={`New assignment for ${course.code}`}
+                >
+                  New Assignment
+                </Button>
+              </CardContent>
+            </Card>
+          ))}
+        </Box>
+      )}
 
-              <Typography variant="h6" sx={{ mt: 2 }}>Override</Typography>
-              <TextField
-                label="Final Score"
-                fullWidth
-                value={overrideScore}
-                onChange={(e) => setOverrideScore(e.target.value)}
-                sx={{ mt: 1 }}
-              />
-            </>
+      <Typography variant="h3" sx={{ mb: 2 }}>
+        Recent Submissions
+      </Typography>
+      <TeacherSubmissionsGrid />
+
+      <Dialog
+        open={dialogCourseId != null}
+        onClose={() => setDialogCourseId(null)}
+        fullWidth
+        maxWidth="sm"
+        aria-labelledby="teacher-new-assignment-title"
+      >
+        <DialogTitle id="teacher-new-assignment-title">
+          New assignment — {dialogCourse?.code ?? ""}
+        </DialogTitle>
+        <DialogContent>
+          {dialogCourseId != null && (
+            <AssignmentForm
+              courseId={dialogCourseId}
+              onCancel={() => setDialogCourseId(null)}
+              onSuccess={async () => {
+                setDialogCourseId(null);
+                await loadCourses();
+              }}
+            />
           )}
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setSelected(null)}>Close</Button>
-          <Button variant="contained" onClick={saveOverride}>Save Override</Button>
-        </DialogActions>
       </Dialog>
-    </Container>
+    </Box>
   );
 }

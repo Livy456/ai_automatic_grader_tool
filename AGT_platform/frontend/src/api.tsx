@@ -116,6 +116,31 @@ export const api = {
     if (!res.ok) throw new Error(`POST ${path} failed: ${res.status} ${text}`);
     return text ? JSON.parse(text) : null;
   },
+
+  async patch(path: string, body: object) {
+    const headers = withAuthHeaders();
+    headers.set("Content-Type", "application/json");
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+      headers,
+      credentials: "include",
+    });
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(`PATCH ${path} failed: ${res.status} ${text}`);
+    return text ? JSON.parse(text) : null;
+  },
+
+  async delete(path: string) {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "DELETE",
+      headers: withAuthHeaders(),
+      credentials: "include",
+    });
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(`DELETE ${path} failed: ${res.status} ${text}`);
+    return text ? JSON.parse(text) : null;
+  },
 };
 
 export async function listAssignments(): Promise<Assignment[]> {
@@ -134,4 +159,101 @@ export async function getAssignment(id: string): Promise<Assignment> {
 
 export async function startGrading(id: string): Promise<{ ok: boolean }> {
   return api.post(`/api/assignments/${id}/grade`);
+}
+
+// ── Course / Enrollment / Assignment types ────────────────────────────────
+
+export type CourseListItem = {
+  id: number;
+  code: string;
+  title: string;
+  enrollment_role: "student" | "teacher" | null;
+};
+
+export type CourseDetail = {
+  id: number;
+  code: string;
+  title: string;
+  enrollments: Array<{
+    enrollment_id?: number;
+    user_id: number;
+    email: string;
+    name: string;
+    role: "student" | "teacher";
+  }>;
+};
+
+export type RubricCriterion = {
+  criterion: string;
+  max_score: number;
+};
+
+export type CourseAssignment = {
+  id: number;
+  course_id: number;
+  title: string;
+  description: string;
+  modality: string;
+  rubric: RubricCriterion[];
+  due_date: string | null;
+  created_at: string | null;
+};
+
+export type CreateAssignmentPayload = {
+  title: string;
+  description?: string;
+  modality: string;
+  rubric?: RubricCriterion[];
+  due_date?: string | null;
+};
+
+export type CreateEnrollmentPayload = {
+  course_id: number;
+  user_id: number;
+  role: "student" | "teacher";
+};
+
+// ── Course helpers ────────────────────────────────────────────────────────
+
+export function listCourses(): Promise<CourseListItem[]> {
+  return api.get("/api/courses");
+}
+
+export function getCourse(courseId: number): Promise<CourseDetail> {
+  return api.get(`/api/courses/${courseId}`);
+}
+
+export function listCourseAssignments(courseId: number): Promise<CourseAssignment[]> {
+  return api.get(`/api/courses/${courseId}/assignments`);
+}
+
+export function createCourseAssignment(
+  courseId: number,
+  payload: CreateAssignmentPayload
+): Promise<{ id: number; title: string; course_id: number }> {
+  return api.post(`/api/courses/${courseId}/assignments`, payload);
+}
+
+export function updateCourseAssignment(
+  courseId: number,
+  assignmentId: number,
+  payload: Partial<CreateAssignmentPayload>
+): Promise<{ id: number; title: string }> {
+  return api.patch(`/api/courses/${courseId}/assignments/${assignmentId}`, payload);
+}
+
+// ── Admin enrollment helpers ──────────────────────────────────────────────
+
+export function adminListCourseEnrollments(
+  courseId: number
+): Promise<CourseDetail["enrollments"]> {
+  return api.get(`/api/admin/courses/${courseId}/enrollments`);
+}
+
+export function adminEnrollUser(payload: CreateEnrollmentPayload): Promise<{ id: number }> {
+  return api.post("/api/admin/enrollments", payload);
+}
+
+export function adminRemoveEnrollment(enrollmentId: number): Promise<{ ok: boolean }> {
+  return api.delete(`/api/admin/enrollments/${enrollmentId}`);
 }

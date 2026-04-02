@@ -35,6 +35,7 @@ class Assignment(Base):
     modality = Column(String, nullable=False)
     rubric = Column(JSON, nullable=False)
     created_at = Column(DateTime)
+    due_date = Column(DateTime, nullable=True)
 
     course = relationship("Course")
     attachments = relationship("AssignmentAttachment", back_populates="assignment")
@@ -87,6 +88,7 @@ class Course(Base):
     id = Column(Integer, primary_key=True)
     code = Column(String, nullable=False)
     title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
 
 class Enrollment(Base):
     __tablename__ = "enrollments"
