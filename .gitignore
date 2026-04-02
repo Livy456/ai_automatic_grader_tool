@@ -75,35 +75,10 @@ uploads
 
 DIA_ai_scorer.pem
 
-**/SECRETS_SETUP.md
-**/SSH_KEY_SETUP.md
-**/EC2_SSH_GUIDE.md
-**/CLOUDFLARE_DEPLOYMENT.md
-**/OAUTH_SETUP.md
-**/CURSOR_REMOTE_SSH_SETUP.md
-**/EC2_SSH_TROUBLESHOOTING.md
-**/EC2_IP_UPDATE.md
-**/SSH_CONNECTION_DEBUG.md
-**/SSH_KEY_AUTHENTICATION_FIX.md
-**/ADMIN_USER_MANAGEMENT.md
-**/SSH_IP_CHANGE_FIX.md
-**/SSH_KEY_TYPE_RECOMMENDATION.md
-**/DOCKER_EC2_TROUBLESHOOTING.md
-**/EC2_SSH_TIMEOUT_TROUBLESHOOTING.md
-**/EXTERNAL_PRIVILEGE_SEPARATION_SETUP.md
-**/S3_BUCKET_SETUP.md
-**/WEBSITE_INFRASTRUCTURE.md
-**/USER_AND_JWT_SETUP.md
-**/AGT_LOCAL_AND_PRODUCTION_RUNBOOK.md
-**/AGT_platform/DOCKER_DESKTOP.md
-**/docs/production_architecture_redesign.md
-**/docs/AZURE_AI_GRADER_WEBSITE_SETUP.md
-**/docs/AZURE_ENTRA_TENANT_AND_GUEST_ACCESS.md
-**/BUG_REPORT.md
-**/docs/role_assignment.md
-
+# Vite production output — never commit; rebuild with `npm run build` or Docker.
+AGT_platform/frontend/dist/
+**/docs/*
 # Local how-to (not committed)
-RESTART_DEV_SERVER.md
 
 # environment variables file for GPU host
 env.production.gpu

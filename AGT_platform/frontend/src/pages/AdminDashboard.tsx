@@ -49,6 +49,17 @@ type AuditRow = {
   target_id: number;
 };
 
+// Module-level cache — survives unmount/remount from React Router. Populated after the
+// first successful refresh(); remounts show cached data immediately while a background
+// refresh runs (stale-while-revalidate).
+type AdminCache = {
+  users: AdminUser[];
+  courses: AdminCourseRow[];
+  audit: AuditRow[];
+  roleDraft: Record<number, string>;
+};
+let _cache: AdminCache | null = null;
+
 function AdminUsersEmptyOverlay() {
   return (
     <Box sx={{ py: 6, textAlign: "center", color: "text.secondary" }}>
@@ -59,15 +70,15 @@ function AdminUsersEmptyOverlay() {
 
 export default function AdminDashboard() {
   const [tab, setTab] = useState(0);
-  const [users, setUsers] = useState<AdminUser[]>([]);
-  const [courses, setCourses] = useState<AdminCourseRow[]>([]);
-  const [audit, setAudit] = useState<AuditRow[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [users, setUsers] = useState<AdminUser[]>(_cache?.users ?? []);
+  const [courses, setCourses] = useState<AdminCourseRow[]>(_cache?.courses ?? []);
+  const [audit, setAudit] = useState<AuditRow[]>(_cache?.audit ?? []);
+  const [loading, setLoading] = useState(_cache === null);
   const [newCode, setNewCode] = useState("");
   const [newTitle, setNewTitle] = useState("");
   const [newDescription, setNewDescription] = useState("");
   const [creating, setCreating] = useState(false);
-  const [roleDraft, setRoleDraft] = useState<Record<number, string>>({});
+  const [roleDraft, setRoleDraft] = useState<Record<number, string>>(_cache?.roleDraft ?? {});
   const [savingId, setSavingId] = useState<number | null>(null);
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: "success" | "error" }>({
     open: false,
@@ -86,7 +97,9 @@ export default function AdminDashboard() {
   const [assignments, setAssignments] = useState<CourseAssignment[]>([]);
 
   const refresh = useCallback(async () => {
-    setLoading(true);
+    if (_cache === null) {
+      setLoading(true);
+    }
     try {
       const [u, c, a] = await Promise.all([
         api.get("/api/admin/users") as Promise<AdminUser[]>,
@@ -95,29 +108,30 @@ export default function AdminDashboard() {
           Array<{ time: string; actor_user_id: number | null; action: string; target_type: string; target_id: number }>
         >,
       ]);
-      setUsers(Array.isArray(u) ? u : []);
+
+      const nextUsers = Array.isArray(u) ? u : [];
       const courseRows = Array.isArray(c) ? c : [];
-      setCourses(
-        courseRows.map((row) => ({
-          ...row,
-          enrollment_count: typeof row.enrollment_count === "number" ? row.enrollment_count : 0,
-        })),
-      );
-      setAudit(
-        (Array.isArray(a) ? a : []).map((row, i) => ({
-          ...row,
-          id: `audit-${row.time}-${i}`,
-        })),
-      );
+      const nextCourses = courseRows.map((row) => ({
+        ...row,
+        enrollment_count: typeof row.enrollment_count === "number" ? row.enrollment_count : 0,
+      }));
+      const nextAudit = (Array.isArray(a) ? a : []).map((row, i) => ({
+        ...row,
+        id: `audit-${row.time}-${i}`,
+      }));
       const rd: Record<number, string> = {};
-      (Array.isArray(u) ? u : []).forEach((x) => {
+      nextUsers.forEach((x) => {
         rd[x.id] = x.role;
       });
+
+      _cache = { users: nextUsers, courses: nextCourses, audit: nextAudit, roleDraft: rd };
+
+      setUsers(nextUsers);
+      setCourses(nextCourses);
+      setAudit(nextAudit);
       setRoleDraft(rd);
-    } catch {
-      setUsers([]);
-      setCourses([]);
-      setAudit([]);
+    } catch (err) {
+      console.error("[AdminDashboard] refresh failed:", err);
     } finally {
       setLoading(false);
     }

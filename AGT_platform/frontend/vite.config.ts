@@ -33,6 +33,8 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           // Local Flask is http:// — secure:true can break the proxy; only verify TLS for https targets.
           secure: proxySecure,
+          // See docs/BUG_REPORT_ADMIN_WRITE_401.md — http-proxy-middleware can drop
+          // Authorization when changeOrigin is true; re-attach on every proxied request.
           configure(proxy) {
             proxy.on("proxyReq", (proxyReq, req) => {
               const auth = req.headers.authorization;

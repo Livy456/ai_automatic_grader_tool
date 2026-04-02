@@ -39,7 +39,9 @@ def create_app():
     app.config["SESSION_COOKIE_SECURE"] = bool(_cfg.SESSION_COOKIE_SECURE)
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-    
+
+    # Explicit allow_headers so preflight allows Authorization (cross-origin SPA → API).
+    # See docs/BUG_REPORT_ADMIN_WRITE_401.md
     CORS(
         app,
         supports_credentials=True,
