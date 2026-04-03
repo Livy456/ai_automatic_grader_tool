@@ -16,6 +16,8 @@ import AssignmentsBrowse from "./pages/AssignmentsBrowse";
 import AssignmentDetail from "./pages/AssignmentDetail";
 import MyGrades from "./pages/MyGrades";
 import SubmissionsList from "./pages/SubmissionsList";
+import StandaloneAutograder from "./pages/StandaloneAutograder";
+import StandaloneResult from "./pages/StandaloneResult";
 
 interface JwtPayload {
   role: string;
@@ -58,6 +60,8 @@ const router = createBrowserRouter(
           <Route path="assignments/:id/submit" element={<SubmitAssignment />} />
           <Route path="submissions" element={<SubmissionsList />} />
           <Route path="submissions/:id" element={<SubmissionReview />} />
+          <Route path="autograder" element={<StandaloneAutograder />} />
+          <Route path="autograder/:id" element={<StandaloneResult />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Route>

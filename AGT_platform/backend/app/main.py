@@ -15,6 +15,7 @@ from .routes.health import bp as health_bp
 from .routes.submissions import bp as submissions_bp
 from .routes.admin import bp as admin_bp
 from .routes.courses import bp as courses_bp
+from .routes.standalone import bp as standalone_bp
 from .routes_assignments import bp as assignments_bp
 from .routes.assignment_materials import bp as assignment_materials_bp
 
@@ -71,6 +72,7 @@ def create_app():
     app.register_blueprint(submissions_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(courses_bp)
+    app.register_blueprint(standalone_bp)
     return app
 
 if __name__ == "__main__":

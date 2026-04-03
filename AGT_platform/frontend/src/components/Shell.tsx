@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Outlet,
   useLocation,
@@ -7,9 +7,11 @@ import {
 } from "react-router-dom";
 import { jwtDecode } from "jwt-decode";
 import {
+  Alert,
   AppBar,
   Avatar,
   Box,
+  Button,
   Chip,
   Divider,
   Drawer,
@@ -18,6 +20,7 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  Snackbar,
   Toolbar,
   Tooltip,
   Typography,
@@ -32,6 +35,7 @@ import UploadFileOutlined from "@mui/icons-material/UploadFileOutlined";
 import AssignmentTurnedInOutlined from "@mui/icons-material/AssignmentTurnedInOutlined";
 import AssignmentOutlined from "@mui/icons-material/AssignmentOutlined";
 import AdminPanelSettingsOutlined from "@mui/icons-material/AdminPanelSettingsOutlined";
+import AutoFixHighOutlined from "@mui/icons-material/AutoFixHighOutlined";
 import { getToken, clearToken } from "../auth";
 
 interface JwtPayload {
@@ -60,8 +64,10 @@ function pageTitle(pathname: string): string {
   if (pathname === "/grades") return "My Grades";
   if (pathname === "/assignments") return "Assignments";
   if (pathname === "/submissions") return "Submissions";
+  if (pathname === "/autograder") return "Autograder";
   if (pathname === "/admin") return "Admin Panel";
   if (pathname === "/teacher") return "Teacher";
+  if (/^\/autograder\/\d+$/.test(pathname)) return "Autograder Result";
   const submit = pathname.match(/^\/assignments\/(\d+)\/submit$/);
   if (submit) return "Submit Assignment";
   const sub = pathname.match(/^\/submissions\/(\d+)$/);
@@ -100,6 +106,12 @@ const NAV_ITEMS: NavItem[] = [
     roles: ["teacher", "admin"],
   },
   {
+    label: "Autograder",
+    to: "/autograder",
+    icon: <AutoFixHighOutlined />,
+    roles: "all",
+  },
+  {
     label: "Admin Panel",
     to: "/admin",
     icon: <AdminPanelSettingsOutlined />,
@@ -134,6 +146,57 @@ export default function Shell() {
       return null;
     }
   }, [location.pathname]);
+
+  const [sessionWarning, setSessionWarning] = useState(false);
+  const [sessionSnackOpen, setSessionSnackOpen] = useState(false);
+
+  useEffect(() => {
+    const onSessionExpired = () => setSessionSnackOpen(true);
+    window.addEventListener("session-expired", onSessionExpired);
+    return () => window.removeEventListener("session-expired", onSessionExpired);
+  }, []);
+
+  useEffect(() => {
+    const t = getToken();
+    if (!t) {
+      setSessionWarning(false);
+      return;
+    }
+
+    let exp: number | undefined;
+    try {
+      const decoded = jwtDecode<{ exp?: number }>(t);
+      exp = decoded.exp;
+    } catch {
+      clearToken();
+      navigate("/login", { replace: true });
+      return;
+    }
+
+    if (exp == null) {
+      setSessionWarning(false);
+      return;
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const secsLeft = exp - nowSec;
+
+    if (secsLeft <= 0) {
+      clearToken();
+      navigate("/login?reason=session_expired", { replace: true });
+      return;
+    }
+
+    setSessionWarning(secsLeft <= 600);
+
+    const ms = secsLeft * 1000;
+    const timer = setTimeout(() => {
+      clearToken();
+      navigate("/login?reason=session_expired", { replace: true });
+    }, Math.min(ms, 2_147_483_647));
+
+    return () => clearTimeout(timer);
+  }, [location.pathname, navigate]);
 
   const role = payload?.role ?? "student";
   const navItems = filterNav(role);
@@ -235,6 +298,15 @@ export default function Shell() {
 
   return (
     <Box sx={{ display: "flex", minHeight: "100vh", bgcolor: "background.default" }}>
+      <Snackbar
+        open={sessionSnackOpen}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        sx={{ zIndex: (t) => t.zIndex.modal + 2 }}
+      >
+        <Alert severity="warning" variant="filled" sx={{ width: "100%" }} role="alert">
+          Your session has expired. Please log in again. Redirecting to login…
+        </Alert>
+      </Snackbar>
       <AppBar
         position="fixed"
         elevation={0}
@@ -356,6 +428,35 @@ export default function Shell() {
         }}
       >
         <Toolbar />
+        {sessionWarning && (
+          <Box
+            sx={{
+              bgcolor: "warning.light",
+              color: "warning.contrastText",
+              px: 3,
+              py: 1,
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+            }}
+            role="alert"
+            aria-live="polite"
+          >
+            <Typography variant="body2" sx={{ flex: 1 }}>
+              Your session expires in less than 10 minutes. Save your work and sign in again to
+              continue.
+            </Typography>
+            <Button
+              size="small"
+              variant="contained"
+              color="warning"
+              onClick={handleLogout}
+              aria-label="Sign in again now"
+            >
+              Sign in again
+            </Button>
+          </Box>
+        )}
         <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1400, mx: "auto" }}>
           <Outlet />
         </Box>

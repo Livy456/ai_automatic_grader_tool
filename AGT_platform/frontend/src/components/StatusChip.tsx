@@ -15,11 +15,14 @@ type StatusChipProps = {
 };
 
 const labelMap: Record<string, string> = {
+  uploading: "Uploading",
+  uploaded: "Uploaded",
   queued: "Queued",
   grading: "Grading",
   graded: "Graded",
   error: "Error",
   needs_review: "Needs review",
+  deleted: "Deleted",
 };
 
 export default function StatusChip({ status, size = "small" }: StatusChipProps) {

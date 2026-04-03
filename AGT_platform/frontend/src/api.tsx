@@ -8,17 +8,52 @@ function withAuthHeaders(extra?: HeadersInit): Headers {
   return h;
 }
 
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+
+let sessionVerifyInflight: Promise<"valid" | "invalid"> | null = null;
+
+function verifySessionStatus(): Promise<"valid" | "invalid"> {
+  if (!sessionVerifyInflight) {
+    sessionVerifyInflight = fetch(`${API_BASE}/api/auth/me`, {
+      method: "GET",
+      headers: withAuthHeaders(),
+      credentials: "include",
+    })
+      .then((r) => (r.status === 401 ? ("invalid" as const) : ("valid" as const)))
+      .finally(() => {
+        sessionVerifyInflight = null;
+      });
+  }
+  return sessionVerifyInflight;
+}
+
+let logoutScheduled = false;
+
+function scheduleSessionExpiredLogout() {
+  if (logoutScheduled) return;
+  logoutScheduled = true;
+  void import("./auth").then(({ clearToken }) => {
+    clearToken();
+    window.dispatchEvent(new CustomEvent("session-expired"));
+    setTimeout(() => {
+      window.location.replace("/login?reason=session_expired");
+    }, 2000);
+  });
+}
+
 /**
- * Central response handler.
- * - On 401: token expired or revoked → clear it and redirect to login.
- * - On other errors: throw a descriptive Error for the caller.
+ * On 401: confirm with GET /api/auth/me before clearing session (avoids transient false 401s).
  */
 async function handleResponse(res: Response, label: string): Promise<string> {
   const text = await res.text().catch(() => "");
   if (res.status === 401) {
-    const { clearToken } = await import("./auth");
-    clearToken();
-    window.location.replace("/login");
+    const verdict = await verifySessionStatus();
+    if (verdict === "valid") {
+      throw new Error(
+        `${label}: request unauthorized (session still valid). Please retry.`,
+      );
+    }
+    scheduleSessionExpiredLogout();
     return "";
   }
   if (!res.ok) throw new Error(`${label} failed: ${res.status} ${text}`);
@@ -34,8 +69,6 @@ export type Assignment = {
   created_at?: string | null;
   updated_at?: string | null;
 };
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
 /**
  * Browser → S3 (presigned PUT). Do not send auth headers; signature embeds access.
@@ -269,4 +302,100 @@ export function adminEnrollUser(payload: CreateEnrollmentPayload): Promise<{ id:
 
 export function adminRemoveEnrollment(enrollmentId: number): Promise<{ ok: boolean }> {
   return api.delete(`/api/admin/enrollments/${enrollmentId}`);
+}
+
+// ── Standalone autograder ─────────────────────────────────────────────────
+
+export type StandaloneSubmissionSummary = {
+  id: number;
+  title: string;
+  status: string;
+  final_score: number | null;
+  created_at: string | null;
+};
+
+export type StandaloneSubmissionDetail = {
+  id: number;
+  title: string;
+  status: string;
+  final_score: number | null;
+  final_feedback: string | null;
+  grading_dispatch_at: string | null;
+  created_at?: string | null;
+  ai_scores: Array<{
+    criterion: string;
+    score: number;
+    confidence: number;
+    rationale: string;
+  }>;
+};
+
+export type StandaloneListResponse = {
+  items: StandaloneSubmissionSummary[];
+  total: number;
+  page: number;
+  per_page: number;
+};
+
+export type StandaloneFileSpec = {
+  filename: string;
+  content_type: string;
+  artifact_kind?: "submission" | "rubric" | "answer_key";
+};
+
+export async function startStandaloneSubmission(payload: {
+  title: string;
+  files: StandaloneFileSpec[];
+  rubric_text?: string;
+  answer_key_text?: string;
+}): Promise<DirectUploadStartResponse> {
+  return api.post("/api/standalone/submissions/start", payload) as Promise<DirectUploadStartResponse>;
+}
+
+export async function finalizeStandaloneSubmission(
+  submissionId: number,
+): Promise<{ submission_id: number; status: string }> {
+  return api.post(`/api/standalone/submissions/${submissionId}/finalize`, {}) as Promise<{
+    submission_id: number;
+    status: string;
+  }>;
+}
+
+export async function submitStandalone(
+  title: string,
+  filesToUpload: File[],
+  fileSpecs: StandaloneFileSpec[],
+  rubricText?: string,
+  answerKeyText?: string,
+  onProgress?: (fileIndex: number, fraction: number) => void,
+): Promise<{ submission_id: number; status: string }> {
+  const start = await startStandaloneSubmission({
+    title,
+    files: fileSpecs,
+    rubric_text: rubricText || undefined,
+    answer_key_text: answerKeyText || undefined,
+  });
+  for (let i = 0; i < start.uploads.length; i++) {
+    const u = start.uploads[i];
+    const file = filesToUpload[i];
+    if (!file) continue;
+    await putToPresignedUrl(u.upload_url, file, u.content_type);
+    onProgress?.(i, 1);
+  }
+  return finalizeStandaloneSubmission(start.submission_id);
+}
+
+export function listStandaloneSubmissions(
+  page = 1,
+  perPage = 20,
+): Promise<StandaloneListResponse> {
+  return api.get(`/api/standalone/submissions?page=${page}&per_page=${perPage}`);
+}
+
+export function getStandaloneSubmission(id: number): Promise<StandaloneSubmissionDetail> {
+  return api.get(`/api/standalone/submissions/${id}`);
+}
+
+export function deleteStandaloneSubmission(id: number): Promise<{ ok: boolean } | null> {
+  return api.delete(`/api/standalone/submissions/${id}`);
 }

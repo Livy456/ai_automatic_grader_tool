@@ -240,6 +240,16 @@ def login_password():
         db.close()
 
 
+@bp.get("/api/auth/me")
+@require_auth
+def me():
+    """Lightweight session check for the SPA (validates JWT + issued_jwts)."""
+    user = request.user
+    return jsonify(
+        {"id": user["id"], "email": user.get("email", ""), "role": user.get("role", "student")}
+    )
+
+
 @bp.post("/api/auth/logout")
 @require_auth
 def logout():

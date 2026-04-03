@@ -63,6 +63,11 @@ export default function Login() {
         setErr(error);
       }
     }
+
+    const reason = params.get("reason");
+    if (reason === "session_expired") {
+      setErr("Your session has expired. Please sign in again to continue.");
+    }
   }, []);
 
   const canSubmit = useMemo(() => email.includes("@") && email.length > 5, [email]);

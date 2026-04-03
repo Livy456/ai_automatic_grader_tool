@@ -162,3 +162,65 @@ class AuditLog(Base):
     # metadata = Column(JSON, default=dict)
     event_metadata = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StandaloneSubmission(Base):
+    """
+    Standalone autograder submission — not tied to a course or assignment.
+    """
+
+    __tablename__ = "standalone_submissions"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    title = Column(String(512), nullable=False, default="Untitled")
+    status = Column(String(32), nullable=False, default="uploading")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    grading_dispatch_at = Column(DateTime, nullable=True)
+    grading_celery_task_id = Column(String(128), nullable=True)
+
+    final_score = Column(Numeric(5, 2), nullable=True)
+    final_feedback = Column(Text, nullable=True)
+
+    rubric_text = Column(Text, nullable=True)
+    answer_key_text = Column(Text, nullable=True)
+
+    user = relationship("User")
+    artifacts = relationship(
+        "StandaloneArtifact", back_populates="submission", cascade="all, delete-orphan"
+    )
+    scores = relationship(
+        "StandaloneAIScore", back_populates="submission", cascade="all, delete-orphan"
+    )
+
+
+class StandaloneArtifact(Base):
+    __tablename__ = "standalone_artifacts"
+
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("standalone_submissions.id"), nullable=False)
+    kind = Column(String(32), nullable=False)
+    s3_key = Column(String(1024), nullable=False)
+    filename = Column(String(512), nullable=False)
+    sha256 = Column(String(128), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    submission = relationship("StandaloneSubmission", back_populates="artifacts")
+
+
+class StandaloneAIScore(Base):
+    __tablename__ = "standalone_ai_scores"
+
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("standalone_submissions.id"), nullable=False)
+    criterion = Column(String, nullable=False)
+    score = Column(Numeric(5, 2), nullable=False)
+    confidence = Column(Numeric(3, 2), nullable=False)
+    rationale = Column(Text, nullable=False)
+    evidence = Column(JSON, nullable=True)
+    model = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    submission = relationship("StandaloneSubmission", back_populates="scores")
