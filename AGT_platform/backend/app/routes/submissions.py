@@ -144,6 +144,8 @@ def direct_upload_finalize(submission_id: int):
         )
         if not sub:
             return jsonify({"error": "not found"}), 404
+        if sub.student_id is None:
+            return jsonify({"error": "forbidden"}), 403
         if sub.student_id != user["id"]:
             return jsonify({"error": "forbidden"}), 403
 
@@ -275,7 +277,11 @@ def get_submission(submission_id: int):
         if not sub:
             return jsonify({"error": "not found"}), 404
 
-        if user["role"] == "student" and sub.student_id != user["id"]:
+        if (
+            user["role"] == "student"
+            and sub.student_id is not None
+            and sub.student_id != user["id"]
+        ):
             return jsonify({"error": "forbidden"}), 403
 
         scores = db.query(AIScore).filter_by(submission_id=sub.id).all()

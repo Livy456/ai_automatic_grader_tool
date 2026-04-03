@@ -11,7 +11,6 @@ import {
   AppBar,
   Avatar,
   Box,
-  Button,
   Chip,
   Divider,
   Drawer,
@@ -36,6 +35,7 @@ import AssignmentTurnedInOutlined from "@mui/icons-material/AssignmentTurnedInOu
 import AssignmentOutlined from "@mui/icons-material/AssignmentOutlined";
 import AdminPanelSettingsOutlined from "@mui/icons-material/AdminPanelSettingsOutlined";
 import AutoFixHighOutlined from "@mui/icons-material/AutoFixHighOutlined";
+import { apiBase, refreshAccessToken } from "../api";
 import { getToken, clearToken } from "../auth";
 
 interface JwtPayload {
@@ -147,7 +147,6 @@ export default function Shell() {
     }
   }, [location.pathname]);
 
-  const [sessionWarning, setSessionWarning] = useState(false);
   const [sessionSnackOpen, setSessionSnackOpen] = useState(false);
 
   useEffect(() => {
@@ -159,7 +158,6 @@ export default function Shell() {
   useEffect(() => {
     const t = getToken();
     if (!t) {
-      setSessionWarning(false);
       return;
     }
 
@@ -174,7 +172,6 @@ export default function Shell() {
     }
 
     if (exp == null) {
-      setSessionWarning(false);
       return;
     }
 
@@ -182,18 +179,19 @@ export default function Shell() {
     const secsLeft = exp - nowSec;
 
     if (secsLeft <= 0) {
-      clearToken();
-      navigate("/login?reason=session_expired", { replace: true });
+      void refreshAccessToken().then((ok) => {
+        if (!ok) {
+          clearToken();
+          navigate("/login?reason=session_expired", { replace: true });
+        }
+      });
       return;
     }
 
-    setSessionWarning(secsLeft <= 600);
-
-    const ms = secsLeft * 1000;
+    const refreshMs = Math.max((secsLeft - 60) * 1000, 5_000);
     const timer = setTimeout(() => {
-      clearToken();
-      navigate("/login?reason=session_expired", { replace: true });
-    }, Math.min(ms, 2_147_483_647));
+      void refreshAccessToken();
+    }, Math.min(refreshMs, 2_147_483_647));
 
     return () => clearTimeout(timer);
   }, [location.pathname, navigate]);
@@ -291,7 +289,20 @@ export default function Shell() {
     </Box>
   );
 
-  function handleLogout() {
+  async function handleLogout() {
+    const t = getToken();
+    try {
+      await fetch(`${apiBase()}/api/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          ...(t ? { Authorization: `Bearer ${t}` } : {}),
+        },
+      });
+    } catch {
+      /* still clear client state */
+    }
     clearToken();
     navigate("/login", { replace: true });
   }
@@ -428,35 +439,6 @@ export default function Shell() {
         }}
       >
         <Toolbar />
-        {sessionWarning && (
-          <Box
-            sx={{
-              bgcolor: "warning.light",
-              color: "warning.contrastText",
-              px: 3,
-              py: 1,
-              display: "flex",
-              alignItems: "center",
-              gap: 1,
-            }}
-            role="alert"
-            aria-live="polite"
-          >
-            <Typography variant="body2" sx={{ flex: 1 }}>
-              Your session expires in less than 10 minutes. Save your work and sign in again to
-              continue.
-            </Typography>
-            <Button
-              size="small"
-              variant="contained"
-              color="warning"
-              onClick={handleLogout}
-              aria-label="Sign in again now"
-            >
-              Sign in again
-            </Button>
-          </Box>
-        )}
         <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1400, mx: "auto" }}>
           <Outlet />
         </Box>

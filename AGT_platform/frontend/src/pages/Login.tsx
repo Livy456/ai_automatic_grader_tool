@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { useEffect, useMemo, useState } from "react";
+import { refreshAccessToken } from "../api";
 import { setToken } from "../auth";
 import {
   Alert,
@@ -51,7 +52,8 @@ export default function Login() {
     const t = hash.get("token");
     if (t) {
       setToken(t);
-      window.location.href = "/";
+      window.location.replace("/");
+      return;
     }
 
     const params = new URLSearchParams(window.location.search);
@@ -67,6 +69,12 @@ export default function Login() {
     const reason = params.get("reason");
     if (reason === "session_expired") {
       setErr("Your session has expired. Please sign in again to continue.");
+    }
+
+    if (!error) {
+      void refreshAccessToken().then((ok) => {
+        if (ok) window.location.replace("/");
+      });
     }
   }, []);
 
@@ -84,6 +92,7 @@ export default function Login() {
       const res = await fetch(`${API_BASE}/api/auth/login/password`, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
       });
       const data = await res.json().catch(() => ({}));

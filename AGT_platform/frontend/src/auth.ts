@@ -1,10 +1,14 @@
-// src/auth.ts
+// src/auth.ts — access JWT lives in memory only (not localStorage) to reduce XSS persistence.
+let memoryAccessToken: string | null = null;
+
 export function getToken(): string | null {
-  return localStorage.getItem("token");
+  return memoryAccessToken;
 }
+
 export function setToken(t: string) {
-  localStorage.setItem("token", t);
+  memoryAccessToken = t;
 }
+
 export function clearToken() {
-  localStorage.removeItem("token");
+  memoryAccessToken = null;
 }

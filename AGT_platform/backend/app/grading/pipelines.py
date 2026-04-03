@@ -122,9 +122,11 @@ def run_standalone_grading_pipeline(
     answer_key_text: str | None,
     rubric_file_excerpt: str | None,
     answer_key_file_excerpt: str | None,
+    grading_instructions: str | None = None,
 ):
     """
     Course-independent grading: inferred modality, default rubric if none, merged text context.
+    grading_instructions: optional instructor prompt (focus, constraints) fed into the grader prompt.
     """
     modality = infer_modality_from_artifacts(artifacts_bytes)
     merged_rubric_note_parts = []
@@ -141,11 +143,21 @@ def run_standalone_grading_pipeline(
         merged_ak_parts.append("Answer key (from uploaded file):\n" + answer_key_file_excerpt.strip())
     merged_ak = "\n\n".join(merged_ak_parts) if merged_ak_parts else None
 
+    desc_parts = []
+    base_title = (title or "Standalone submission").strip()
+    if base_title:
+        desc_parts.append(base_title)
+    if grading_instructions and str(grading_instructions).strip():
+        desc_parts.append(
+            "Instructor grading instructions:\n" + str(grading_instructions).strip()
+        )
+    description = "\n\n".join(desc_parts) if desc_parts else "Standalone autograder submission"
+
     pseudo = SimpleNamespace(
         modality=modality,
         rubric=list(DEFAULT_STANDALONE_RUBRIC),
         title=title or "Standalone submission",
-        description=title or "Standalone autograder submission",
+        description=description,
     )
     return run_grading_pipeline(
         cfg,

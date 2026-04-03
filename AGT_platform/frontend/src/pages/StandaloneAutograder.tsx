@@ -26,7 +26,7 @@ import InsertDriveFileOutlined from "@mui/icons-material/InsertDriveFileOutlined
 import CloseOutlined from "@mui/icons-material/CloseOutlined";
 import {
   listStandaloneSubmissions,
-  submitStandalone,
+  submitStandaloneDirect,
   type StandaloneFileSpec,
   type StandaloneSubmissionSummary,
 } from "../api";
@@ -40,11 +40,70 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Assignment title for public autograder rows (no course enrollment). */
+function derivedStandaloneTitle(mainFiles: File[]): string {
+  const name = mainFiles[0]?.name ?? "";
+  const stem = name.includes(".") ? name.slice(0, name.lastIndexOf(".")) : name;
+  const base = stem.trim() || "Standalone submission";
+  return base.slice(0, 512);
+}
+
+/** Parallel arrays for presigned upload; order matches SubmitAssignment optionalBlobs. */
+function buildStandaloneFileSpecsAndFiles(
+  mainFiles: File[],
+  keyFile: File | null,
+  rubricFile: File | null,
+  keyText: string,
+  rubricText: string,
+): { files: File[]; specs: StandaloneFileSpec[] } {
+  const specs: StandaloneFileSpec[] = [];
+  for (const f of mainFiles) {
+    specs.push({
+      filename: f.name,
+      content_type: f.type || "application/octet-stream",
+      artifact_kind: "submission",
+    });
+  }
+  const extra: File[] = [];
+  if (keyFile) {
+    extra.push(keyFile);
+    specs.push({
+      filename: keyFile.name,
+      content_type: keyFile.type || "application/octet-stream",
+      artifact_kind: "answer_key",
+    });
+  }
+  if (rubricFile) {
+    extra.push(rubricFile);
+    specs.push({
+      filename: rubricFile.name,
+      content_type: rubricFile.type || "application/octet-stream",
+      artifact_kind: "rubric",
+    });
+  }
+  if (keyText.trim()) {
+    extra.push(new File([keyText], "answer-key.txt", { type: "text/plain" }));
+    specs.push({
+      filename: "answer-key.txt",
+      content_type: "text/plain",
+      artifact_kind: "answer_key",
+    });
+  }
+  if (rubricText.trim()) {
+    extra.push(new File([rubricText], "rubric.txt", { type: "text/plain" }));
+    specs.push({
+      filename: "rubric.txt",
+      content_type: "text/plain",
+      artifact_kind: "rubric",
+    });
+  }
+  return { files: [...mainFiles, ...extra], specs };
+}
+
 export default function StandaloneAutograder() {
   const navigate = useNavigate();
   const [tab, setTab] = useState(0);
   const [activeStep, setActiveStep] = useState(0);
-  const [title, setTitle] = useState("");
   const [mainFiles, setMainFiles] = useState<File[]>([]);
   const [keyFile, setKeyFile] = useState<File | null>(null);
   const [rubricFile, setRubricFile] = useState<File | null>(null);
@@ -57,6 +116,21 @@ export default function StandaloneAutograder() {
   const [history, setHistory] = useState<StandaloneSubmissionSummary[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyLoading, setHistoryLoading] = useState(false);
+
+  const assignmentLabel = "Standalone submission";
+
+  const optionalBlobs = useCallback((): File[] => {
+    const out: File[] = [];
+    if (keyFile) out.push(keyFile);
+    if (rubricFile) out.push(rubricFile);
+    if (keyText.trim()) {
+      out.push(new File([keyText], "answer-key.txt", { type: "text/plain" }));
+    }
+    if (rubricText.trim()) {
+      out.push(new File([rubricText], "rubric.txt", { type: "text/plain" }));
+    }
+    return out;
+  }, [keyFile, rubricFile, keyText, rubricText]);
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -75,52 +149,31 @@ export default function StandaloneAutograder() {
     if (tab === 1) void loadHistory();
   }, [tab, loadHistory]);
 
+  const onDropMain = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const list = e.dataTransfer.files;
+    if (list?.length) setMainFiles(Array.from(list));
+  };
+
   const submit = async () => {
-    if (!title.trim() || mainFiles.length === 0) return;
+    if (mainFiles.length === 0) return;
     setErr(null);
     setBusy(true);
     setProgress(0);
-
-    const fileSpecs: StandaloneFileSpec[] = [];
-    const filesToUpload: File[] = [];
-
-    for (const f of mainFiles) {
-      fileSpecs.push({
-        filename: f.name,
-        content_type: f.type || "application/octet-stream",
-        artifact_kind: "submission",
-      });
-      filesToUpload.push(f);
-    }
-    if (rubricFile) {
-      fileSpecs.push({
-        filename: rubricFile.name,
-        content_type: rubricFile.type || "application/octet-stream",
-        artifact_kind: "rubric",
-      });
-      filesToUpload.push(rubricFile);
-    }
-    if (keyFile) {
-      fileSpecs.push({
-        filename: keyFile.name,
-        content_type: keyFile.type || "application/octet-stream",
-        artifact_kind: "answer_key",
-      });
-      filesToUpload.push(keyFile);
-    }
-
-    const n = filesToUpload.length || 1;
+    const { files: allFiles, specs } = buildStandaloneFileSpecsAndFiles(
+      mainFiles,
+      keyFile,
+      rubricFile,
+      keyText,
+      rubricText,
+    );
+    const n = allFiles.length || 1;
+    const title = derivedStandaloneTitle(mainFiles);
     try {
-      const result = await submitStandalone(
-        title.trim(),
-        filesToUpload,
-        fileSpecs,
-        rubricText.trim() || undefined,
-        keyText.trim() || undefined,
-        (fileIndex, frac) => {
-          setProgress(((fileIndex + frac) / n) * 100);
-        },
-      );
+      const result = await submitStandaloneDirect(title, allFiles, specs, (fileIndex, frac) => {
+        setProgress(((fileIndex + frac) / n) * 100);
+      });
       setProgress(100);
       navigate(`/autograder/${result.submission_id}`);
     } catch (e: unknown) {
@@ -130,19 +183,13 @@ export default function StandaloneAutograder() {
     }
   };
 
-  const summaryFiles = [...mainFiles];
-  if (rubricFile) summaryFiles.push(rubricFile);
-  if (keyFile) summaryFiles.push(keyFile);
-
-  const canNextStep0 = mainFiles.length > 0 && title.trim().length > 0;
+  const canNextStep0 = mainFiles.length > 0;
+  const summaryFiles = [...mainFiles, ...optionalBlobs()];
 
   return (
     <Box>
       <Typography variant="h3" sx={{ mb: 2 }}>
-        Standalone Autograder
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Grade files without enrolling in a course. Optional rubric and answer key improve accuracy.
+        {assignmentLabel}
       </Typography>
 
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }} aria-label="Autograder sections">
@@ -228,28 +275,13 @@ export default function StandaloneAutograder() {
           {activeStep === 0 && (
             <Card>
               <CardContent>
-                <TextField
-                  label="Submission title"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  fullWidth
-                  required
-                  sx={{ mb: 2 }}
-                  placeholder="e.g. My Essay Draft"
-                  aria-label="Submission title"
-                />
                 <Box
                   onDragOver={(e) => {
                     e.preventDefault();
                     setDragOver(true);
                   }}
                   onDragLeave={() => setDragOver(false)}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    setDragOver(false);
-                    const list = e.dataTransfer.files;
-                    if (list?.length) setMainFiles(Array.from(list));
-                  }}
+                  onDrop={onDropMain}
                   sx={{
                     border: "2px dashed",
                     borderColor: dragOver ? "secondary.main" : "divider",
@@ -258,11 +290,11 @@ export default function StandaloneAutograder() {
                     textAlign: "center",
                     bgcolor: dragOver ? "action.hover" : "background.paper",
                   }}
-                  aria-label="Drop zone for files to grade"
+                  aria-label="Drop zone for assignment files"
                 >
                   <CloudUploadOutlined sx={{ fontSize: 48, color: "text.secondary", mb: 1 }} aria-hidden />
                   <Typography variant="subtitle1" gutterBottom>
-                    Drag files to grade
+                    Drag your assignment here
                   </Typography>
                   <Button variant="outlined" component="label" sx={{ mt: 1 }} aria-label="Browse files">
                     Browse files
@@ -277,7 +309,7 @@ export default function StandaloneAutograder() {
                     />
                   </Button>
                   <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 2 }}>
-                    PDF, DOCX, TXT, IPYNB, ZIP, MP4, PNG, JPG · Max 20 files (per server policy)
+                    Accepted: PDF, DOCX, TXT, IPYNB, ZIP, MP4, PNG, JPG · Max 1 GB per file (per institution policy)
                   </Typography>
                 </Box>
                 {mainFiles.length > 0 && (
@@ -330,11 +362,15 @@ export default function StandaloneAutograder() {
             <Card>
               <CardContent>
                 <Typography variant="subtitle1" gutterBottom>
-                  Answer key / sample response (optional)
+                  Answer Key / Sample Response (optional)
                 </Typography>
                 <Button variant="outlined" component="label" size="small" sx={{ mb: 1 }} aria-label="Upload answer key file">
                   Upload file
-                  <input type="file" hidden onChange={(e) => setKeyFile(e.target.files?.[0] ?? null)} />
+                  <input
+                    type="file"
+                    hidden
+                    onChange={(e) => setKeyFile(e.target.files?.[0] ?? null)}
+                  />
                 </Button>
                 {keyFile && (
                   <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
@@ -358,9 +394,18 @@ export default function StandaloneAutograder() {
                 <Typography variant="subtitle1" gutterBottom>
                   Rubric (optional)
                 </Typography>
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                  Optional context for the grader. Full LTI rubric sync is not wired here —{" "}
+                  {/* TODO: POST /api/course-assignments/:id/materials when student uploads are allowed */}
+                  files are bundled with your submission upload for now.
+                </Typography>
                 <Button variant="outlined" component="label" size="small" sx={{ mb: 1 }} aria-label="Upload rubric file">
                   Upload file
-                  <input type="file" hidden onChange={(e) => setRubricFile(e.target.files?.[0] ?? null)} />
+                  <input
+                    type="file"
+                    hidden
+                    onChange={(e) => setRubricFile(e.target.files?.[0] ?? null)}
+                  />
                 </Button>
                 {rubricFile && (
                   <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
@@ -398,32 +443,25 @@ export default function StandaloneAutograder() {
                 <Typography variant="h3" sx={{ mb: 2 }}>
                   Review &amp; Submit
                 </Typography>
-                <Typography variant="body2">
-                  <strong>Title:</strong> {title.trim() || "—"}
+                <Typography variant="body2" color="text.secondary">
+                  Assignment: {assignmentLabel}
                 </Typography>
                 <Typography variant="body2" sx={{ mt: 1 }}>
                   Files ({summaryFiles.length}):{" "}
                   {summaryFiles.map((f) => f.name).join(", ") || "—"}
                 </Typography>
-                {(rubricText.trim() || keyText.trim()) && (
-                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
-                    Includes pasted rubric and/or answer key text.
-                  </Typography>
-                )}
                 <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
                   Total size ~ {formatBytes(summaryFiles.reduce((s, f) => s + f.size, 0))}
                 </Typography>
-                {busy && (
-                  <LinearProgress variant="determinate" value={progress} sx={{ mt: 2 }} aria-label="Upload progress" />
-                )}
+                {busy && <LinearProgress variant="determinate" value={progress} sx={{ mt: 2 }} aria-label="Upload progress" />}
                 <Button
                   variant="contained"
                   color="primary"
                   size="large"
                   fullWidth
                   sx={{ mt: 3 }}
-                  disabled={busy || !canNextStep0}
-                  onClick={submit}
+                  disabled={busy || mainFiles.length === 0}
+                  onClick={() => void submit()}
                   aria-label="Submit for grading"
                 >
                   {busy ? <CircularProgress size={22} color="inherit" aria-label="Submitting" /> : "Submit for Grading"}

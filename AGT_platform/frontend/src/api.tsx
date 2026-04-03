@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import { getToken } from "./auth";
+import { getToken, setToken } from "./auth";
 
 function withAuthHeaders(extra?: HeadersInit): Headers {
   const h = new Headers(extra ?? {});
@@ -10,19 +10,77 @@ function withAuthHeaders(extra?: HeadersInit): Headers {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
+/** Public API origin for logout and other callers outside this module. */
+export function apiBase(): string {
+  return API_BASE;
+}
+
+let refreshInFlight: Promise<boolean> | null = null;
+
+/**
+ * Uses HttpOnly refresh cookie; returns a new access JWT into memory on success.
+ */
+export async function refreshAccessToken(): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) return false;
+  const data = (await res.json().catch(() => ({}))) as { access_token?: string };
+  if (!data.access_token) return false;
+  setToken(data.access_token);
+  return true;
+}
+
+async function synchronizedRefresh(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = refreshAccessToken().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function fetchWithAuthRetry(path: string, init: RequestInit): Promise<Response> {
+  const url = `${API_BASE}${path}`;
+  let res = await fetch(url, init);
+  if (res.status === 401) {
+    const ok = await synchronizedRefresh();
+    if (ok) {
+      const h = new Headers(init.headers as HeadersInit);
+      const token = getToken();
+      if (token) h.set("Authorization", `Bearer ${token}`);
+      else h.delete("Authorization");
+      res = await fetch(url, { ...init, headers: h });
+    }
+  }
+  return res;
+}
+
 let sessionVerifyInflight: Promise<"valid" | "invalid"> | null = null;
 
 function verifySessionStatus(): Promise<"valid" | "invalid"> {
   if (!sessionVerifyInflight) {
-    sessionVerifyInflight = fetch(`${API_BASE}/api/auth/me`, {
-      method: "GET",
-      headers: withAuthHeaders(),
-      credentials: "include",
-    })
-      .then((r) => (r.status === 401 ? ("invalid" as const) : ("valid" as const)))
-      .finally(() => {
-        sessionVerifyInflight = null;
+    sessionVerifyInflight = (async () => {
+      const me = `${API_BASE}/api/auth/me`;
+      let r = await fetch(me, {
+        method: "GET",
+        headers: withAuthHeaders(),
+        credentials: "include",
       });
+      if (r.status !== 401) return "valid" as const;
+      const refreshed = await synchronizedRefresh();
+      if (!refreshed) return "invalid" as const;
+      r = await fetch(me, {
+        method: "GET",
+        headers: withAuthHeaders(),
+        credentials: "include",
+      });
+      return r.status === 401 ? ("invalid" as const) : ("valid" as const);
+    })().finally(() => {
+      sessionVerifyInflight = null;
+    });
   }
   return sessionVerifyInflight;
 }
@@ -91,6 +149,7 @@ export async function putToPresignedUrl(
 
 export type DirectUploadStartResponse = {
   submission_id: number;
+  assignment_id?: number;
   status: string;
   uploads: Array<{
     artifact_id: number;
@@ -133,7 +192,7 @@ export async function submitAssignmentDirect(
 
 export const api = {
   async get(path: string) {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetchWithAuthRetry(path, {
       method: "GET",
       headers: withAuthHeaders(),
       credentials: "include",
@@ -154,7 +213,7 @@ export const api = {
       if (body instanceof FormData) headers.delete("Content-Type");
     }
 
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetchWithAuthRetry(path, {
       method: "POST",
       body: payload,
       headers,
@@ -168,7 +227,7 @@ export const api = {
   async patch(path: string, body: object) {
     const headers = withAuthHeaders();
     headers.set("Content-Type", "application/json");
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetchWithAuthRetry(path, {
       method: "PATCH",
       body: JSON.stringify(body),
       headers,
@@ -179,7 +238,7 @@ export const api = {
   },
 
   async delete(path: string) {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetchWithAuthRetry(path, {
       method: "DELETE",
       headers: withAuthHeaders(),
       credentials: "include",
@@ -304,7 +363,31 @@ export function adminRemoveEnrollment(enrollmentId: number): Promise<{ ok: boole
   return api.delete(`/api/admin/enrollments/${enrollmentId}`);
 }
 
-// ── Standalone autograder ─────────────────────────────────────────────────
+// ── Standalone autograder (public API; optional Bearer when logged in) ────
+
+async function standaloneAutograderFetch(path: string, init: RequestInit): Promise<Response> {
+  const url = `${API_BASE}${path}`;
+  const h = new Headers(init.headers);
+  const token = getToken();
+  if (token) {
+    h.set("Authorization", `Bearer ${token}`);
+  } else {
+    h.delete("Authorization");
+  }
+  return fetch(url, {
+    ...init,
+    headers: h,
+    credentials: token ? "include" : "omit",
+  });
+}
+
+async function standaloneAutograderJson<T>(res: Response, label: string): Promise<T> {
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw new Error(`${label} failed: ${res.status} ${text}`);
+  }
+  return (text ? JSON.parse(text) : null) as T;
+}
 
 export type StandaloneSubmissionSummary = {
   id: number;
@@ -320,6 +403,7 @@ export type StandaloneSubmissionDetail = {
   status: string;
   final_score: number | null;
   final_feedback: string | null;
+  grading_instructions?: string | null;
   grading_dispatch_at: string | null;
   created_at?: string | null;
   ai_scores: Array<{
@@ -349,53 +433,139 @@ export async function startStandaloneSubmission(payload: {
   rubric_text?: string;
   answer_key_text?: string;
 }): Promise<DirectUploadStartResponse> {
-  return api.post("/api/standalone/submissions/start", payload) as Promise<DirectUploadStartResponse>;
+  const res = await standaloneAutograderFetch("/api/standalone/submissions/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return standaloneAutograderJson<DirectUploadStartResponse>(res, "POST standalone start");
 }
 
 export async function finalizeStandaloneSubmission(
   submissionId: number,
-): Promise<{ submission_id: number; status: string }> {
-  return api.post(`/api/standalone/submissions/${submissionId}/finalize`, {}) as Promise<{
-    submission_id: number;
-    status: string;
-  }>;
+  options?: { enqueue_grading?: boolean },
+): Promise<{
+  submission_id: number;
+  status: string;
+  celery_task_id?: string;
+  enqueue_grading?: boolean;
+  already_enqueued?: boolean;
+  already_finalized?: boolean;
+}> {
+  const body: Record<string, boolean> = {};
+  if (options?.enqueue_grading === false) {
+    body.enqueue_grading = false;
+  }
+  const res = await standaloneAutograderFetch(
+    `/api/standalone/submissions/${submissionId}/finalize`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return standaloneAutograderJson(res, "POST standalone finalize");
 }
 
-export async function submitStandalone(
+export async function patchStandaloneContext(
+  submissionId: number,
+  payload: {
+    rubric_text?: string;
+    answer_key_text?: string;
+    grading_instructions?: string;
+  },
+): Promise<{ submission_id: number; ok: boolean }> {
+  const res = await standaloneAutograderFetch(
+    `/api/standalone/submissions/${submissionId}/context`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  return standaloneAutograderJson(res, "PATCH standalone context");
+}
+
+export async function presignStandaloneContextFiles(
+  submissionId: number,
+  files: StandaloneFileSpec[],
+): Promise<{ submission_id: number; uploads: DirectUploadStartResponse["uploads"] }> {
+  const res = await standaloneAutograderFetch(
+    `/api/standalone/submissions/${submissionId}/context_files/presign`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files }),
+    },
+  );
+  return standaloneAutograderJson(res, "POST standalone context presign");
+}
+
+export async function enqueueStandaloneGrading(submissionId: number): Promise<{
+  submission_id: number;
+  status: string;
+  celery_task_id?: string;
+  already_enqueued?: boolean;
+}> {
+  const res = await standaloneAutograderFetch(
+    `/api/standalone/submissions/${submissionId}/enqueue_grading`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
+  return standaloneAutograderJson(res, "POST standalone enqueue");
+}
+
+/**
+ * Standalone autograder: presigned start → S3 PUTs → finalize with grading enqueued.
+ * Mirrors {@link submitAssignmentDirect}; caller supplies parallel `files` and `fileSpecs` (with artifact_kind).
+ */
+export async function submitStandaloneDirect(
   title: string,
-  filesToUpload: File[],
+  files: File[],
   fileSpecs: StandaloneFileSpec[],
-  rubricText?: string,
-  answerKeyText?: string,
   onProgress?: (fileIndex: number, fraction: number) => void,
+  options?: { rubric_text?: string; answer_key_text?: string },
 ): Promise<{ submission_id: number; status: string }> {
   const start = await startStandaloneSubmission({
     title,
     files: fileSpecs,
-    rubric_text: rubricText || undefined,
-    answer_key_text: answerKeyText || undefined,
+    rubric_text: options?.rubric_text,
+    answer_key_text: options?.answer_key_text,
   });
   for (let i = 0; i < start.uploads.length; i++) {
     const u = start.uploads[i];
-    const file = filesToUpload[i];
+    const file = files[i];
     if (!file) continue;
     await putToPresignedUrl(u.upload_url, file, u.content_type);
     onProgress?.(i, 1);
   }
-  return finalizeStandaloneSubmission(start.submission_id);
+  return finalizeStandaloneSubmission(start.submission_id, { enqueue_grading: true });
 }
 
-export function listStandaloneSubmissions(
+export async function listStandaloneSubmissions(
   page = 1,
   perPage = 20,
 ): Promise<StandaloneListResponse> {
-  return api.get(`/api/standalone/submissions?page=${page}&per_page=${perPage}`);
+  const res = await standaloneAutograderFetch(
+    `/api/standalone/submissions?page=${page}&per_page=${perPage}`,
+    { method: "GET" },
+  );
+  return standaloneAutograderJson(res, "GET standalone list");
 }
 
-export function getStandaloneSubmission(id: number): Promise<StandaloneSubmissionDetail> {
-  return api.get(`/api/standalone/submissions/${id}`);
+export async function getStandaloneSubmission(id: number): Promise<StandaloneSubmissionDetail> {
+  const res = await standaloneAutograderFetch(`/api/standalone/submissions/${id}`, {
+    method: "GET",
+  });
+  return standaloneAutograderJson(res, "GET standalone submission");
 }
 
-export function deleteStandaloneSubmission(id: number): Promise<{ ok: boolean } | null> {
-  return api.delete(`/api/standalone/submissions/${id}`);
+export async function deleteStandaloneSubmission(id: number): Promise<{ ok: boolean } | null> {
+  const res = await standaloneAutograderFetch(`/api/standalone/submissions/${id}`, {
+    method: "DELETE",
+  });
+  return standaloneAutograderJson(res, "DELETE standalone submission");
 }

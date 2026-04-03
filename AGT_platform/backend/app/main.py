@@ -32,7 +32,8 @@ def create_app():
         app.config["MAX_CONTENT_LENGTH"] = _cfg.WEB_MAX_BODY_BYTES
     
     # Flask session cookie: used only for OAuth (Authlib) state/CSRF during provider redirects.
-    # Authenticated API access uses Authorization: Bearer <JWT>, not session cookies.
+    # Authenticated API access: short-lived JWT in Authorization (held in SPA memory) plus
+    # HttpOnly refresh cookie (see /api/auth/refresh and REFRESH_* / JWT_* env vars).
     # SECRET_KEY comes from Config / .env.local + .env (see app.config.from_object above).
     if not (app.config.get("SECRET_KEY") or "").strip():
         app.config["SECRET_KEY"] = "dev_secret"
@@ -73,6 +74,7 @@ def create_app():
     app.register_blueprint(admin_bp)
     app.register_blueprint(courses_bp)
     app.register_blueprint(standalone_bp)
+    
     return app
 
 if __name__ == "__main__":

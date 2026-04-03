@@ -201,7 +201,13 @@ def delete_enrollment(enrollment_id: int):
 def list_assignments():
     db = SessionLocal()
     try:
-        items = db.query(Assignment).order_by(Assignment.id.desc()).limit(200).all()
+        items = (
+            db.query(Assignment)
+            .filter(Assignment.course_id.isnot(None))
+            .order_by(Assignment.id.desc())
+            .limit(200)
+            .all()
+        )
         return jsonify(
             [
                 {

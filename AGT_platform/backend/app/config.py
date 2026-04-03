@@ -22,11 +22,35 @@ def _env_bool(key: str) -> bool:
     return os.getenv(key, "").strip().lower() == "true"
 
 
+def _refresh_cookie_secure() -> bool:
+    """True when refresh cookies must use Secure. Mirrors session cookies unless overridden."""
+    raw = os.getenv("REFRESH_COOKIE_SECURE", "").strip().lower()
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    return _env_bool("SESSION_COOKIE_SECURE")
+
+
 class Config:
     SECRET_KEY = _env_str("SECRET_KEY")
     # Host port for `python -m app.main` only. Default 5000; raise if Docker/backend already binds 5000.
     FLASK_PORT = _env_int("FLASK_PORT", default=5000)
-    JWT_EXPIRATION_SECONDS = _env_int("JWT_EXPIRATION_SECONDS", default=8 * 3600)
+    # Short-lived API bearer (JWT). If JWT_ACCESS_EXPIRATION_SECONDS is unset, JWT_EXPIRATION_SECONDS is used (legacy).
+    JWT_ACCESS_EXPIRATION_SECONDS = (
+        _env_int("JWT_ACCESS_EXPIRATION_SECONDS", default=0)
+        or _env_int("JWT_EXPIRATION_SECONDS", default=15 * 60)
+    )
+    # Same value as JWT_ACCESS_EXPIRATION_SECONDS (legacy env name used in ops docs).
+    JWT_EXPIRATION_SECONDS = JWT_ACCESS_EXPIRATION_SECONDS
+    # Long-lived refresh (HttpOnly cookie); used to mint new access tokens without re-login.
+    JWT_REFRESH_EXPIRATION_SECONDS = _env_int(
+        "JWT_REFRESH_EXPIRATION_SECONDS", default=7 * 24 * 3600
+    )
+    REFRESH_TOKEN_COOKIE_NAME = _env_str("REFRESH_TOKEN_COOKIE_NAME").strip() or "refresh_token"
+    REFRESH_COOKIE_SECURE = _refresh_cookie_secure()
+    _rss = _env_str("REFRESH_COOKIE_SAMESITE").strip().lower()
+    REFRESH_COOKIE_SAMESITE = _rss if _rss in ("lax", "strict", "none") else "lax"
     DATABASE_URL = _env_str("DATABASE_URL")
     REDIS_URL = _env_str("REDIS_URL")
     FRONTEND_BASE_URL = _env_str("FRONTEND_BASE_URL")

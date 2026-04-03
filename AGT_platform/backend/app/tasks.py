@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 
 from celery import Celery
 from sqlalchemy.orm import selectinload
@@ -65,6 +66,8 @@ def grade_submission(self, submission_id: int):
             return
         if sub.status == "error":
             return
+        if sub.status == "deleted":
+            return
         if sub.status != "queued":
             # e.g. still uploading — do not grade
             return
@@ -79,9 +82,25 @@ def grade_submission(self, submission_id: int):
             db.commit()
             return
 
-        artifacts = {}
+        def _filename_hint_from_s3_key(key: str) -> str:
+            part = (key or "").rsplit("/", 1)[-1]
+            if "_" in part:
+                return part.split("_", 1)[-1]
+            return part
+
+        artifacts: dict = {}
+        rubric_ex = ""
+        answer_ex = ""
         for art in sub.artifacts:
             data = get_object_bytes(cfg, art.s3_key)
+            fn_hint = _filename_hint_from_s3_key(art.s3_key)
+            if art.kind in ("rubric", "answer_key"):
+                ex = _excerpt_file_bytes(fn_hint, data)
+                if art.kind == "rubric":
+                    rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
+                else:
+                    answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
+                continue
             if art.kind.endswith("pdf"):
                 artifacts["pdf"] = data
             if art.kind.endswith("txt"):
@@ -92,8 +111,57 @@ def grade_submission(self, submission_id: int):
                 artifacts["py"] = data
             if art.kind.endswith("mp4"):
                 artifacts["mp4"] = data
+            if art.kind.endswith("zip"):
+                artifacts["zip"] = data
+            if art.kind.endswith("png"):
+                artifacts["png"] = data
+            if art.kind.endswith("jpg") or art.kind.endswith("jpeg"):
+                artifacts["jpg"] = data
+            if art.kind.endswith("docx"):
+                artifacts["docx"] = data
 
-        result = run_grading_pipeline(cfg, assignment, artifacts)
+        is_public_autograder = assignment.course_id is None
+        if is_public_autograder:
+            merged_rubric_parts = []
+            grt = getattr(assignment, "grader_rubric_text", None)
+            if grt and str(grt).strip():
+                merged_rubric_parts.append(str(grt).strip())
+            if rubric_ex:
+                merged_rubric_parts.append("Rubric (from uploaded file):\n" + rubric_ex.strip())
+            merged_rubric = "\n\n".join(merged_rubric_parts) if merged_rubric_parts else None
+
+            merged_ak_parts = []
+            gak = getattr(assignment, "grader_answer_key_text", None)
+            if gak and str(gak).strip():
+                merged_ak_parts.append(str(gak).strip())
+            if answer_ex:
+                merged_ak_parts.append("Answer key (from uploaded file):\n" + answer_ex.strip())
+            merged_ak = "\n\n".join(merged_ak_parts) if merged_ak_parts else None
+
+            instr = getattr(assignment, "grader_instructions", None)
+            desc_parts = []
+            base = (assignment.description or assignment.title or "").strip()
+            if base:
+                desc_parts.append(base)
+            if instr and str(instr).strip():
+                desc_parts.append("Instructor grading instructions:\n" + str(instr).strip())
+            merged_desc = "\n\n".join(desc_parts) if desc_parts else (assignment.title or "Submission")
+
+            assign_for_prompt = SimpleNamespace(
+                modality=assignment.modality,
+                rubric=assignment.rubric,
+                title=assignment.title,
+                description=merged_desc,
+            )
+            result = run_grading_pipeline(
+                cfg,
+                assign_for_prompt,
+                artifacts,
+                rubric_text=merged_rubric,
+                answer_key_text=merged_ak,
+            )
+        else:
+            result = run_grading_pipeline(cfg, assignment, artifacts)
         model_used = (result.pop("_model_used", None) or cfg.OLLAMA_MODEL)[:200]
         result.pop("_used_openai_arbitration", None)
 
@@ -213,6 +281,7 @@ def grade_standalone_submission(self, submission_id: int):
             sub.answer_key_text,
             rubric_ex or None,
             answer_ex or None,
+            getattr(sub, "grading_instructions", None),
         )
         model_used = (result.pop("_model_used", None) or cfg.OLLAMA_MODEL)[:200]
         result.pop("_used_openai_arbitration", None)

@@ -1,18 +1,20 @@
 # backend/app/auth.py
+import hashlib
+import secrets
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 import jwt
 from authlib.integrations.flask_client import OAuth
-from flask import Blueprint, current_app, jsonify, redirect, request
+from flask import Blueprint, current_app, jsonify, make_response, redirect, request
 from werkzeug.security import check_password_hash
 
 from .config import Config
 from .extensions import SessionLocal
-from .models import IssuedJwt, User
-from .rbac import require_auth
+from .models import IssuedJwt, RefreshToken, User
+from .rbac import get_user_from_token, require_auth
 
 bp = Blueprint("auth", __name__)
 oauth = OAuth()
@@ -176,15 +178,82 @@ def _is_college_email(email: str) -> bool:
     # In production, you might want a whitelist
     return True
 
-def _issue_token(user: User, db) -> str:
+
+def _hash_refresh(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _normalize_samesite(cfg: Config) -> str:
+    s = (cfg.REFRESH_COOKIE_SAMESITE or "lax").lower()
+    if s == "none":
+        return "None"
+    if s == "strict":
+        return "Strict"
+    return "Lax"
+
+
+def _refresh_secure_for_response(cfg: Config) -> bool:
+    """SameSite=None requires Secure in modern browsers."""
+    if _normalize_samesite(cfg) == "None":
+        return True
+    return bool(cfg.REFRESH_COOKIE_SECURE)
+
+
+def _apply_refresh_cookie(resp, raw_token: str) -> None:
+    cfg = Config()
+    resp.set_cookie(
+        cfg.REFRESH_TOKEN_COOKIE_NAME,
+        raw_token,
+        max_age=int(cfg.JWT_REFRESH_EXPIRATION_SECONDS),
+        httponly=True,
+        secure=_refresh_secure_for_response(cfg),
+        samesite=_normalize_samesite(cfg),
+        path="/",
+    )
+
+
+def _clear_refresh_cookie(resp) -> None:
+    cfg = Config()
+    resp.set_cookie(
+        cfg.REFRESH_TOKEN_COOKIE_NAME,
+        "",
+        max_age=0,
+        httponly=True,
+        secure=_refresh_secure_for_response(cfg),
+        samesite=_normalize_samesite(cfg),
+        path="/",
+    )
+
+
+def _create_refresh_token(user: User, db) -> str:
+    """Rotate refresh: revoke other active rows for this user, persist new hash, return raw secret."""
+    cfg = Config()
+    now = datetime.utcnow()
+    db.query(RefreshToken).filter(
+        RefreshToken.user_id == user.id,
+        RefreshToken.revoked_at.is_(None),
+    ).update({"revoked_at": now})
+    raw = secrets.token_urlsafe(48)
+    exp = now + timedelta(seconds=int(cfg.JWT_REFRESH_EXPIRATION_SECONDS))
+    db.add(
+        RefreshToken(
+            user_id=user.id,
+            token_hash=_hash_refresh(raw),
+            expires_at=exp,
+        )
+    )
+    db.commit()
+    return raw
+
+
+def _issue_access_token(user: User, db) -> str:
     """
-    Issue a signed JWT and persist its jti in issued_jwts (API auth is Bearer + server allowlist).
-    End-user identity is not stored in Flask session cookies—only OAuth CSRF state uses the session.
+    Short-lived access JWT; client keeps it in memory only. jti is allowlisted in issued_jwts.
     """
     cfg = Config()
     jti = str(uuid.uuid4())
     now_ts = int(time.time())
-    exp_ts = now_ts + int(cfg.JWT_EXPIRATION_SECONDS)
+    exp_ts = now_ts + int(cfg.JWT_ACCESS_EXPIRATION_SECONDS)
     secret = cfg.SECRET_KEY or "dev_secret"
     payload = {
         "id": user.id,
@@ -227,13 +296,53 @@ def login_password():
         db.commit()
         db.refresh(user)
 
-        token = _issue_token(user, db)
+        access = _issue_access_token(user, db)
+        raw_refresh = _create_refresh_token(user, db)
         cfg = Config()
+        resp = make_response(
+            jsonify(
+                {
+                    "access_token": access,
+                    "token_type": "Bearer",
+                    "expires_in": cfg.JWT_ACCESS_EXPIRATION_SECONDS,
+                }
+            )
+        )
+        _apply_refresh_cookie(resp, raw_refresh)
+        return resp
+    finally:
+        db.close()
+
+
+@bp.post("/api/auth/refresh")
+def refresh_access():
+    """
+    Exchange HttpOnly refresh cookie for a new in-memory access token (no Bearer required).
+    """
+    cfg = Config()
+    raw = request.cookies.get(cfg.REFRESH_TOKEN_COOKIE_NAME)
+    if not raw:
+        return jsonify({"error": "unauthorized"}), 401
+
+    db = SessionLocal()
+    try:
+        h = _hash_refresh(raw)
+        row = db.query(RefreshToken).filter(RefreshToken.token_hash == h).one_or_none()
+        if row is None or row.revoked_at is not None:
+            return jsonify({"error": "unauthorized"}), 401
+        if row.expires_at < datetime.utcnow():
+            return jsonify({"error": "unauthorized"}), 401
+
+        user = db.query(User).get(int(row.user_id))
+        if user is None:
+            return jsonify({"error": "unauthorized"}), 401
+
+        access = _issue_access_token(user, db)
         return jsonify(
             {
-                "access_token": token,
+                "access_token": access,
                 "token_type": "Bearer",
-                "expires_in": cfg.JWT_EXPIRATION_SECONDS,
+                "expires_in": cfg.JWT_ACCESS_EXPIRATION_SECONDS,
             }
         )
     finally:
@@ -251,22 +360,36 @@ def me():
 
 
 @bp.post("/api/auth/logout")
-@require_auth
 def logout():
-    """Revoke the current JWT (jti) so it no longer passes get_user_from_token."""
-    jti = request.user.get("jti")
-    if not jti:
-        return jsonify({"error": "invalid token"}), 400
+    """Revoke access JWT if present, revoke refresh cookie row, clear refresh cookie."""
+    resp = make_response(jsonify({"ok": True}))
+    _clear_refresh_cookie(resp)
 
-    db = SessionLocal()
-    try:
-        row = db.query(IssuedJwt).filter_by(jti=jti).one_or_none()
-        if row:
-            row.revoked_at = datetime.utcnow()
-            db.commit()
-    finally:
-        db.close()
-    return jsonify({"ok": True})
+    u = get_user_from_token()
+    if u and u.get("jti"):
+        db = SessionLocal()
+        try:
+            row = db.query(IssuedJwt).filter_by(jti=u["jti"]).one_or_none()
+            if row:
+                row.revoked_at = datetime.utcnow()
+                db.commit()
+        finally:
+            db.close()
+
+    cfg = Config()
+    raw = request.cookies.get(cfg.REFRESH_TOKEN_COOKIE_NAME)
+    if raw:
+        db = SessionLocal()
+        try:
+            h = _hash_refresh(raw)
+            rrow = db.query(RefreshToken).filter(RefreshToken.token_hash == h).one_or_none()
+            if rrow and rrow.revoked_at is None:
+                rrow.revoked_at = datetime.utcnow()
+                db.commit()
+        finally:
+            db.close()
+
+    return resp
 
 @bp.post("/api/auth/discover")
 def discover():
@@ -420,11 +543,13 @@ def _handle_oauth_callback(provider_name: str):
                 user.institution_domain = domain
             db.commit()
 
-        jwt_token = _issue_token(user, db)
+        raw_refresh = _create_refresh_token(user, db)
     finally:
         db.close()
 
-    return redirect(f"{_frontend_origin()}/login#token={jwt_token}")
+    resp = redirect(f"{_frontend_origin()}/login")
+    _apply_refresh_cookie(resp, raw_refresh)
+    return resp
 
 @bp.get("/api/auth/callback")
 def callback():
@@ -463,11 +588,13 @@ def callback():
                 user.institution_domain = domain
             db.commit()
 
-        jwt_token = _issue_token(user, db)
+        raw_refresh = _create_refresh_token(user, db)
     finally:
         db.close()
 
-    return redirect(f"{_frontend_origin()}/login#token={jwt_token}")
+    resp = redirect(f"{_frontend_origin()}/login")
+    _apply_refresh_cookie(resp, raw_refresh)
+    return resp
 
 @bp.get("/api/auth/callback/microsoft")
 def callback_microsoft():

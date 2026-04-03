@@ -1,11 +1,15 @@
+import { useEffect, useState } from "react";
 import {
   createBrowserRouter,
   createRoutesFromElements,
   Navigate,
   Outlet,
   Route,
+  useLocation,
 } from "react-router-dom";
+import { Box, CircularProgress } from "@mui/material";
 import { jwtDecode } from "jwt-decode";
+import { refreshAccessToken } from "./api";
 import { getToken } from "./auth";
 import Shell from "./components/Shell";
 import Login from "./pages/Login";
@@ -24,7 +28,48 @@ interface JwtPayload {
 }
 
 function PrivateLayout() {
-  if (!getToken()) {
+  const location = useLocation();
+  const publicAutograder = location.pathname.startsWith("/autograder");
+  const [gate, setGate] = useState<"loading" | "in" | "out">("loading");
+
+  useEffect(() => {
+    if (publicAutograder) {
+      setGate("in");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      if (getToken()) {
+        if (!cancelled) setGate("in");
+        return;
+      }
+      const ok = await refreshAccessToken();
+      if (!cancelled) setGate(ok ? "in" : "out");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [publicAutograder]);
+
+  if (publicAutograder) {
+    return <Outlet />;
+  }
+
+  if (gate === "loading") {
+    return (
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          minHeight: "50vh",
+        }}
+      >
+        <CircularProgress aria-label="Loading session" />
+      </Box>
+    );
+  }
+  if (gate === "out") {
     return <Navigate to="/login" replace />;
   }
   return <Outlet />;

@@ -29,13 +29,18 @@ class Assignment(Base):
     __tablename__ = "assignments"
 
     id = Column(Integer, primary_key=True)
-    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False)
+    # Null when the assignment is created by the public standalone autograder (no course).
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True)
     title = Column(String, nullable=False)
     description = Column(Text)
     modality = Column(String, nullable=False)
     rubric = Column(JSON, nullable=False)
     created_at = Column(DateTime)
     due_date = Column(DateTime, nullable=True)
+    # Optional text context for public autograder rows (course_id IS NULL); used by grade_submission.
+    grader_rubric_text = Column(Text, nullable=True)
+    grader_answer_key_text = Column(Text, nullable=True)
+    grader_instructions = Column(Text, nullable=True)
 
     course = relationship("Course")
     attachments = relationship("AssignmentAttachment", back_populates="assignment")
@@ -83,6 +88,20 @@ class IssuedJwt(Base):
     revoked_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
+class RefreshToken(Base):
+    """Opaque refresh token (hash stored); raw value is placed in an HttpOnly cookie only."""
+
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class Course(Base):
     __tablename__ = "courses"
     id = Column(Integer, primary_key=True)
@@ -113,7 +132,8 @@ class Submission(Base):
     __tablename__ = "submissions"
     id = Column(Integer, primary_key=True)
     assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=False)
-    student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # Null for anonymous public autograder uploads; set when a JWT is present at upload time.
+    student_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     status = Column(String(32), nullable=False, default="uploading")
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -124,6 +144,8 @@ class Submission(Base):
 
     final_score = Column(Numeric(5, 2))
     final_feedback = Column(Text)
+    # Best-effort client IP for anonymous autograder rate limiting / mutation checks.
+    submitter_ip = Column(String(64), nullable=True)
 
     assignment = relationship("Assignment")
     student = relationship("User")
@@ -186,6 +208,8 @@ class StandaloneSubmission(Base):
 
     rubric_text = Column(Text, nullable=True)
     answer_key_text = Column(Text, nullable=True)
+    # Optional free-text prompt (focus, learning goals) combined with rubric / sample in the grader.
+    grading_instructions = Column(Text, nullable=True)
 
     user = relationship("User")
     artifacts = relationship(
