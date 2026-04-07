@@ -72,6 +72,48 @@ def openai_client_if_configured(cfg: Config) -> OpenAIJsonClient | None:
     return OpenAIJsonClient(key, cfg.OPENAI_MODEL)
 
 
+def _parse_model_spec(spec: str, cfg: Config) -> tuple[ChatClient, str] | None:
+    """Parse a 'provider:model' spec into (client, label). Returns None if invalid/empty."""
+    if not spec:
+        return None
+    if spec.startswith("openai:"):
+        model_name = spec[len("openai:") :].strip()
+        key = (cfg.OPENAI_API_KEY or "").strip()
+        if not key or not model_name:
+            return None
+        return OpenAIJsonClient(key, model_name), f"openai:{model_name}"
+    if spec.startswith("ollama:"):
+        model_name = spec[len("ollama:") :].strip()
+    else:
+        # Bare model name defaults to Ollama
+        model_name = spec.strip()
+    if not model_name:
+        return None
+    base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip()
+    if not base:
+        return None
+    return OllamaClient(base, model_name), f"ollama:{model_name}"
+
+
+def build_grading_clients(cfg: Config) -> list[tuple[ChatClient, str]]:
+    """
+    Return 1–3 (client, model_label) pairs for multi-LLM grading.
+    Always includes the primary Ollama model. Slots 2 and 3 come from
+    GRADING_MODEL_2 / GRADING_MODEL_3 env vars.
+    """
+    primary = primary_ollama_client(cfg)
+    om = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
+    primary_label = f"ollama:{om}"
+    clients: list[tuple[ChatClient, str]] = [(primary, primary_label)]
+
+    for spec in (cfg.GRADING_MODEL_2, cfg.GRADING_MODEL_3):
+        parsed = _parse_model_spec(spec, cfg)
+        if parsed:
+            clients.append(parsed)
+
+    return clients
+
+
 def maybe_escalate_grade(
     cfg: Config,
     primary: ChatClient,

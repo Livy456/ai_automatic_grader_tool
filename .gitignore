@@ -78,6 +78,8 @@ DIA_ai_scorer.pem
 # Vite production output — never commit; rebuild with `npm run build` or Docker.
 AGT_platform/frontend/dist/
 **/docs/*
+**/important_docs/*
+
 # Local how-to (not committed)
 
 # environment variables file for GPU host

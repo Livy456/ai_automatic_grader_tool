@@ -169,6 +169,7 @@ def grade_submission(self, submission_id: int):
         else:
             result = run_grading_pipeline(cfg, assignment, artifacts)
         model_used = (result.pop("_model_used", None) or cfg.OLLAMA_MODEL)[:200]
+        models_used = result.pop("_models_used", [model_used])
         result.pop("_used_openai_arbitration", None)
 
         criteria = result.get("criteria", [])
@@ -214,6 +215,7 @@ def grade_submission(self, submission_id: int):
                     else None,
                     "final_feedback": sub_ref.final_feedback,
                     "model_used": model_used,
+                    "models_used": models_used,
                     "graded_at": sub_ref.updated_at.isoformat()
                     if sub_ref.updated_at
                     else None,
@@ -332,6 +334,7 @@ def grade_standalone_submission(self, submission_id: int):
             getattr(sub, "grading_instructions", None),
         )
         model_used = (result.pop("_model_used", None) or cfg.OLLAMA_MODEL)[:200]
+        models_used = result.pop("_models_used", [model_used])
         result.pop("_used_openai_arbitration", None)
 
         criteria = result.get("criteria", [])
@@ -378,6 +381,7 @@ def grade_standalone_submission(self, submission_id: int):
                     else None,
                     "final_feedback": sub_ref.final_feedback,
                     "model_used": model_used,
+                    "models_used": models_used,
                     "graded_at": sub_ref.updated_at.isoformat()
                     if sub_ref.updated_at
                     else None,

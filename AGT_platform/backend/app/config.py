@@ -145,6 +145,11 @@ class Config:
     # If true, re-run or arbitrate grading with OpenAI when local model confidence is low.
     ESCALATE_TO_OPENAI = _env_bool("ESCALATE_TO_OPENAI")
 
+    # Multi-LLM grading: two additional models grade alongside the primary.
+    # Format: "ollama:<model>" or "openai:<model>". Empty = disabled (single-model flow).
+    GRADING_MODEL_2 = _env_str("GRADING_MODEL_2").strip()
+    GRADING_MODEL_3 = _env_str("GRADING_MODEL_3").strip()
+
     WHISPER_ENABLED = _env_bool("WHISPER_ENABLED")
 
     # Celery worker tuning (documented for ops; worker command line should match).

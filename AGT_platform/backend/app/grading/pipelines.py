@@ -1,12 +1,17 @@
+import logging
+from collections import defaultdict
 from types import SimpleNamespace
 
 from .agent import plan, grade
 from .llm_router import (
+    build_grading_clients,
     maybe_escalate_grade,
     openai_client_if_configured,
     primary_ollama_client,
 )
 from .tools import extract_text_from_pdf, extract_from_ipynb, run_python_tests, transcribe_video_stub
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_STANDALONE_RUBRIC = [
     {"criterion": "Clarity", "max_score": 25},
@@ -45,6 +50,94 @@ def _build_assignment_prompt(assignment, rubric_text: str | None, answer_key_tex
     return "\n\n".join(parts) if parts else "Grade this submission."
 
 
+def _average_grading_results(results: list[tuple[dict, str]]) -> dict:
+    """
+    Average scores from multiple LLM grading results.
+
+    Each entry is (grading_result_dict, model_label).
+    """
+    if len(results) == 1:
+        merged = results[0][0]
+        merged["_model_used"] = results[0][1]
+        merged["_models_used"] = [results[0][1]]
+        return merged
+
+    n = len(results)
+
+    overall_scores = []
+    overall_confidences = []
+    summaries = []
+    for res, _label in results:
+        ov = res.get("overall", {}) or {}
+        overall_scores.append(float(ov.get("score", 0)))
+        overall_confidences.append(float(ov.get("confidence", 0)))
+        summaries.append(ov.get("summary", "") or "")
+
+    avg_overall_score = round(sum(overall_scores) / n, 2)
+    avg_overall_confidence = round(sum(overall_confidences) / n, 2)
+
+    criteria_by_name: dict[str, list[dict]] = defaultdict(list)
+    for res, _label in results:
+        for c in res.get("criteria", []) or []:
+            criteria_by_name[c.get("name", "unknown")].append(c)
+
+    merged_criteria = []
+    for name in sorted(criteria_by_name.keys()):
+        entries = criteria_by_name[name]
+        m = len(entries)
+        avg_score = round(sum(float(e.get("score", 0)) for e in entries) / m, 2)
+        avg_conf = round(sum(float(e.get("confidence", 0)) for e in entries) / m, 2)
+        e0 = entries[0]
+        max_pts = e0.get("max_points")
+        if max_pts is None:
+            max_pts = e0.get("max_score")
+        rationales = [e.get("rationale", "") for e in entries if e.get("rationale")]
+        all_quotes = []
+        all_notes = []
+        for e in entries:
+            ev = e.get("evidence", {})
+            if isinstance(ev, dict):
+                all_quotes.extend(ev.get("quotes", []) or [])
+                if ev.get("notes"):
+                    all_notes.append(str(ev["notes"]))
+
+        merged_criteria.append(
+            {
+                "name": name,
+                "score": avg_score,
+                "max_points": max_pts,
+                "confidence": avg_conf,
+                "rationale": " | ".join(rationales),
+                "evidence": {
+                    "quotes": all_quotes,
+                    "notes": " | ".join(all_notes) if all_notes else "",
+                },
+            }
+        )
+
+    all_flags: set[str] = set()
+    for res, _label in results:
+        all_flags.update(res.get("flags") or [])
+
+    model_labels = [label for _, label in results]
+    summary_parts = []
+    for (res, label), s in zip(results, summaries):
+        if s:
+            summary_parts.append(f"[{label}] {s}")
+
+    return {
+        "overall": {
+            "score": avg_overall_score,
+            "confidence": avg_overall_confidence,
+            "summary": " | ".join(summary_parts),
+        },
+        "criteria": merged_criteria,
+        "flags": list(all_flags),
+        "_model_used": ", ".join(model_labels),
+        "_models_used": model_labels,
+    }
+
+
 def run_grading_pipeline(
     cfg,
     assignment,
@@ -58,6 +151,9 @@ def run_grading_pipeline(
 
     Heavy inference runs on GPU workers (Ollama). OpenAI is optional server-side escalation.
     Optional rubric_text / answer_key_text add instructor context to the grader prompt.
+
+    When GRADING_MODEL_2 / GRADING_MODEL_3 are configured, multiple LLMs grade independently
+    and the final score is the arithmetic average of their grades.
     """
     client = primary_ollama_client(cfg)
     secondary = openai_client_if_configured(cfg)
@@ -92,25 +188,51 @@ def run_grading_pipeline(
     rubric = getattr(assignment, "rubric", None) or []
     assignment_prompt = _build_assignment_prompt(assignment, rubric_text, answer_key_text)
 
-    result = grade(
-        client=client,
-        rubric=rubric,
-        assignment_prompt=assignment_prompt,
-        submission_context=ctx,
-    )
-    result = maybe_escalate_grade(
-        cfg,
-        client,
-        secondary,
-        rubric,
-        assignment_prompt,
-        ctx,
-        result,
-    )
-    if result.get("_used_openai_arbitration"):
-        result["_model_used"] = f"openai:{cfg.OPENAI_MODEL}"
+    grading_clients = build_grading_clients(cfg)
+    grading_results: list[tuple[dict, str]] = []
+
+    for grading_client, model_label in grading_clients:
+        try:
+            res = grade(
+                client=grading_client,
+                rubric=rubric,
+                assignment_prompt=assignment_prompt,
+                submission_context=ctx,
+            )
+            grading_results.append((res, model_label))
+        except Exception:
+            _log.warning("Grading failed for model %s, skipping", model_label, exc_info=True)
+
+    if not grading_results:
+        result = grade(
+            client=client,
+            rubric=rubric,
+            assignment_prompt=assignment_prompt,
+            submission_context=ctx,
+        )
+        om = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
+        result["_model_used"] = f"ollama:{om}"
+        result["_models_used"] = [f"ollama:{om}"]
+    elif len(grading_results) == 1:
+        result = grading_results[0][0]
+        single_label = grading_results[0][1]
+        result = maybe_escalate_grade(
+            cfg,
+            client,
+            secondary,
+            rubric,
+            assignment_prompt,
+            ctx,
+            result,
+        )
+        if result.get("_used_openai_arbitration"):
+            result["_model_used"] = f"openai:{cfg.OPENAI_MODEL}"
+        else:
+            result["_model_used"] = single_label
+        result["_models_used"] = [result["_model_used"]]
     else:
-        result["_model_used"] = f"ollama:{cfg.OLLAMA_MODEL}"
+        result = _average_grading_results(grading_results)
+
     return result
 
 
