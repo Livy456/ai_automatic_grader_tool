@@ -218,3 +218,13 @@ AGT_platform/
   backend/               # Flask app, Alembic, Celery
   frontend/              # Vite + React
 ```
+
+## Getting Ollama working locally
+# Step 1: Install Ollama
+- https://ollama.com/download
+
+# Step 2: Pull chat models
+- ollama pull llama3.2:3b
+- ollama pull nomic-embed-text
+
+# 

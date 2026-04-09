@@ -84,3 +84,12 @@ AGT_platform/frontend/dist/
 
 # environment variables file for GPU host
 env.production.gpu
+
+# student assignments and rubric for grading
+**/assignments_to_grade/*
+**/rubric/*
+**/grading_output/*
+**/RAG_embedding/*
+
+# Cursor implementation prompt (local only)
+/multi_llm_semantic_entropy.md

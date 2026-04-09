@@ -171,6 +171,8 @@ def grade_submission(self, submission_id: int):
         model_used = (result.pop("_model_used", None) or cfg.OLLAMA_MODEL)[:200]
         models_used = result.pop("_models_used", [model_used])
         result.pop("_used_openai_arbitration", None)
+        result.pop("_pipeline_meta", None)
+        entropy_meta = result.pop("_entropy_meta", None)
 
         criteria = result.get("criteria", [])
         overall = result.get("overall", {})
@@ -195,6 +197,12 @@ def grade_submission(self, submission_id: int):
         sub.final_score = overall.get("score", 0)
         sub.final_feedback = overall.get("summary", "")
         low_conf = any(float(c.get("confidence", 0)) < 0.70 for c in criteria)
+        ent_conf = overall.get("confidence_from_entropy")
+        try:
+            if ent_conf is not None and float(ent_conf) < 0.5:
+                low_conf = True
+        except (TypeError, ValueError):
+            pass
         if low_conf or "needs_review" in flags:
             sub.status = "needs_review"
         else:
@@ -229,6 +237,8 @@ def grade_submission(self, submission_id: int):
                         for c in criteria
                     ],
                 }
+                if entropy_meta is not None:
+                    grading_report["entropy_meta"] = entropy_meta
                 s3_client(cfg).put_object(
                     Bucket=cfg.S3_GRADING_REPORTS_BUCKET,
                     Key=report_key,
@@ -336,6 +346,8 @@ def grade_standalone_submission(self, submission_id: int):
         model_used = (result.pop("_model_used", None) or cfg.OLLAMA_MODEL)[:200]
         models_used = result.pop("_models_used", [model_used])
         result.pop("_used_openai_arbitration", None)
+        result.pop("_pipeline_meta", None)
+        entropy_meta = result.pop("_entropy_meta", None)
 
         criteria = result.get("criteria", [])
         overall = result.get("overall", {})
@@ -359,6 +371,12 @@ def grade_standalone_submission(self, submission_id: int):
         sub.final_score = overall.get("score", 0)
         sub.final_feedback = overall.get("summary", "")
         low_conf = any(float(c.get("confidence", 0)) < 0.70 for c in criteria)
+        ent_conf = overall.get("confidence_from_entropy")
+        try:
+            if ent_conf is not None and float(ent_conf) < 0.5:
+                low_conf = True
+        except (TypeError, ValueError):
+            pass
         if low_conf or "needs_review" in flags:
             sub.status = "needs_review"
         else:
@@ -395,6 +413,8 @@ def grade_standalone_submission(self, submission_id: int):
                         for c in criteria
                     ],
                 }
+                if entropy_meta is not None:
+                    grading_report["entropy_meta"] = entropy_meta
                 s3_client(cfg).put_object(
                     Bucket=cfg.S3_GRADING_REPORTS_BUCKET,
                     Key=report_key,

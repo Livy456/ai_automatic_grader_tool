@@ -18,6 +18,11 @@ def _env_int(key: str, *, default: int) -> int:
     return default if not v else int(v, 10)
 
 
+def _env_float(key: str, *, default: float) -> float:
+    v = os.getenv(key, "").strip()
+    return default if not v else float(v)
+
+
 def _env_bool(key: str) -> bool:
     return os.getenv(key, "").strip().lower() == "true"
 
@@ -149,6 +154,63 @@ class Config:
     # Format: "ollama:<model>" or "openai:<model>". Empty = disabled (single-model flow).
     GRADING_MODEL_2 = _env_str("GRADING_MODEL_2").strip()
     GRADING_MODEL_3 = _env_str("GRADING_MODEL_3").strip()
+
+    # five-stage pipeline: "legacy" (default) | "staged" | "chunk_entropy"
+    GRADING_PIPELINE_MODE = (
+        _env_str("GRADING_PIPELINE_MODE").strip().lower() or "legacy"
+    )
+    REVIEW_CONFIDENCE_THRESHOLD = _env_float(
+        "REVIEW_CONFIDENCE_THRESHOLD", default=0.72
+    )
+    REVIEW_NEAR_BOUNDARY_POINTS = _env_float(
+        "REVIEW_NEAR_BOUNDARY_POINTS", default=2.0
+    )
+    # Max characters of JSON payload sent per LLM call in staged mode (truncation safety).
+    STAGED_PROMPT_MAX_CHARS = _env_int("STAGED_PROMPT_MAX_CHARS", default=28000)
+    # When true, each rubric criterion is scored by every model in GRADING_MODEL_* + primary; scores are averaged.
+    STAGED_MULTI_LLM = _env_bool("STAGED_MULTI_LLM")
+
+    # Stochastic multi-sample grading + semantic entropy (legacy pipeline only; off by default).
+    GRADING_ENTROPY_MODE = (
+        _env_str("GRADING_ENTROPY_MODE").strip().lower() == "on"
+    )
+    # k samples per configured grading model; capped to limit cost. k=1 disables sampling path.
+    GRADING_SAMPLES_PER_MODEL = max(
+        1,
+        min(_env_int("GRADING_SAMPLES_PER_MODEL", default=1), 16),
+    )
+    # Temperature for grade() when entropy sampling is active (k>1). Ollama/OpenAI both support.
+    GRADING_SAMPLE_TEMPERATURE = max(
+        0.0,
+        min(_env_float("GRADING_SAMPLE_TEMPERATURE", default=0.3), 2.0),
+    )
+    # fingerprint (MVP) | openai (reserved; falls back to fingerprint) | off (same as fingerprint)
+    GRADING_ENTROPY_EMBEDDINGS = (
+        _env_str("GRADING_ENTROPY_EMBEDDINGS").strip().lower() or "fingerprint"
+    )
+    # If valid/attempted ratio falls below this, flag needs_review.
+    GRADING_ENTROPY_MIN_SUCCESS_RATE = max(
+        0.0,
+        min(_env_float("GRADING_ENTROPY_MIN_SUCCESS_RATE", default=0.5), 1.0),
+    )
+    # Natural-log semantic entropy above this triggers review flag (tune per deployment).
+    GRADING_ENTROPY_REVIEW_NATURAL_H = _env_float(
+        "GRADING_ENTROPY_REVIEW_NATURAL_H", default=1.0
+    )
+
+    # Ollama /api/chat: request JSON-shaped replies (reduces parse errors). Set to "false" to disable.
+    OLLAMA_CHAT_JSON_FORMAT = _env_str("OLLAMA_CHAT_JSON_FORMAT").strip().lower() != "false"
+    # Per-request timeout for Ollama /api/chat (seconds). Lower on laptops; GPU hosts may use 300+.
+    OLLAMA_CHAT_TIMEOUT_SEC = max(
+        30,
+        min(_env_int("OLLAMA_CHAT_TIMEOUT_SEC", default=300), 3600),
+    )
+
+    # RAG / local embedding export (submission text → vector). Ollama /api/embeddings model name.
+    OLLAMA_EMBEDDINGS_MODEL = (
+        _env_str("OLLAMA_EMBEDDINGS_MODEL").strip() or "nomic-embed-text"
+    )
+    RAG_EMBED_MAX_CHARS = _env_int("RAG_EMBED_MAX_CHARS", default=24000)
 
     WHISPER_ENABLED = _env_bool("WHISPER_ENABLED")
 
