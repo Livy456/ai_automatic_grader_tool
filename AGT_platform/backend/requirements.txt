@@ -18,6 +18,7 @@ openai==1.55.3
 nbformat==5.10.4
 pypdf==5.0.1
 psycopg2-binary==2.9.11
+pytest
 
 # AWS CLI: this app uses boto3 for S3 only. AWS CLI v2 is not installable via pip as
 # awscli 2.x (PyPI has awscli 1.x only). Install the standalone CLI from AWS if needed.

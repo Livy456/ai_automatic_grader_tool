@@ -5,7 +5,10 @@ Layout (at repo root, next to ``AGT_platform/``):
 
 - ``assignments_to_grade/`` — submission files (any supported modality; grouped by shared basename).
 - ``rubric/`` — **either** a single generic rubric **or** per-assignment rubrics.
-- ``grading_output/`` — written as ``<basename>_grade_output.json`` (pipeline JSON only).
+- ``multi-modal_assignments_to_grade/`` — multimodal pipeline JSON as
+  ``<basename>_grade_output.json``.
+- ``multi-modal_RAG_embeding/`` — per-assignment chunk JSON and RAG embedding bundles
+  (same filenames as before: ``<stem>_chunks.json``, ``<stem>_embedding.json``, etc.).
 
 **Generic rubric (grades all assignments):** the first match wins, in order:
 
@@ -20,12 +23,38 @@ generic files use :data:`DEFAULT_STANDALONE_RUBRIC` as row templates.
 **Per-assignment rubric (fallback):** if no generic files exist, use
 ``rubric/<assignment_basename>.{json,md,txt}`` as before.
 
-Requires a running Ollama (or configured OpenAI for staged/escalation paths) matching ``Config``.
+Grading uses :class:`app.grading.multimodal.MultimodalGradingPipeline` with
+:class:`app.grading.multimodal.MultiModelChunkRunner` (``GRADING_SAMPLES_PER_MODEL`` /
+``GRADING_SAMPLE_TEMPERATURE`` per configured model from ``Config``), then maps the
+result to the shared grading JSON shape via :func:`multimodal_assignment_to_grading_dict`.
+
+Requires a running Ollama (and optional ``GRADING_MODEL_2`` / ``GRADING_MODEL_3``)
+matching ``Config``.
+
+**Why this test can run a long time (it is usually not stuck):** the multimodal pipeline
+calls Ollama ``/api/chat`` **sequentially** — for each text chunk,
+``len(build_grading_clients(cfg)) * GRADING_SAMPLES_PER_MODEL`` requests. Long submissions
+split into many chunks; ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` triple the call count;
+``GRADING_SAMPLES_PER_MODEL`` > 1 multiplies it again. Each call can take up to
+``OLLAMA_CHAT_TIMEOUT_SEC`` (default 300s) if the model is slow or overloaded.
+
+**Fast defaults for this test** (so ``pytest`` finishes in minutes, not hours):
+
+- ``MULTIMODAL_LOCAL_TEST_MAX_ASSIGNMENTS`` defaults to **1** (first basename only).
+  Set to ``0`` or ``all`` to grade every assignment under ``assignments_to_grade/``.
+- ``MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES`` defaults to **1** (overrides ``Config`` for
+  this test). Set to ``from_config`` to use ``GRADING_SAMPLES_PER_MODEL`` from ``.env``,
+  or set an explicit integer 1–16.
+- ``MULTIMODAL_LOCAL_TEST_MAX_GRADING_UNITS`` defaults to **8** (caps multimodal chunk
+  units per assignment). Set to ``0`` or ``all`` for no cap.
+
+Override ``OLLAMA_CHAT_TIMEOUT_SEC`` in ``.env`` if each call is slow.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import unittest
 
@@ -35,9 +64,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.config import Config
+from app.grading.grading_units import build_grading_units_from_chunks
 from app.grading.modality_resolution import resolve_modality_profile
+from app.grading.multimodal import (
+    create_multimodal_pipeline_from_app_config,
+    multimodal_assignment_to_grading_dict,
+)
+from app.grading.multimodal.ingestion import ingest_raw_submission
+from app.grading.multimodal.schemas import RubricType
 from app.grading.output_schema import validate_grading_output
-from app.grading.pipelines import DEFAULT_STANDALONE_RUBRIC, run_grading_pipeline
+from app.grading.pipelines import DEFAULT_STANDALONE_RUBRIC
 from app.grading.rag_embeddings import compute_submission_embedding, save_rag_embedding_bundle
 from app.grading.submission_chunks import build_submission_chunks, write_chunks_json
 from app.grading.submission_text import submission_text_from_artifacts
@@ -309,6 +345,59 @@ def _rubric_files_exist_for_stem(stem: str) -> bool:
     )
 
 
+def _multimodal_local_test_max_assignments() -> int | None:
+    """
+    None = grade all basenames. Default when env unset: 1 (first basename only).
+    Set ``MULTIMODAL_LOCAL_TEST_MAX_ASSIGNMENTS=0`` or ``all`` for no limit.
+    """
+    raw = os.getenv("MULTIMODAL_LOCAL_TEST_MAX_ASSIGNMENTS", "").strip().lower()
+    if raw in ("",):
+        return 1
+    if raw in ("0", "all", "none"):
+        return None
+    try:
+        return max(1, int(raw, 10))
+    except ValueError:
+        return 1
+
+
+def _multimodal_local_test_max_grading_units() -> int | None:
+    """
+    Cap units passed to multimodal grading (``max_grading_units`` hint).
+
+    None = no cap. Default when env unset: 8. Set ``0`` or ``all`` for no cap.
+    """
+    raw = os.getenv("MULTIMODAL_LOCAL_TEST_MAX_GRADING_UNITS", "").strip().lower()
+    if raw in ("",):
+        return 8
+    if raw in ("0", "all", "none"):
+        return None
+    try:
+        return max(1, int(raw, 10))
+    except ValueError:
+        return 8
+
+
+def _multimodal_local_test_grading_samples_override(cfg: Config) -> None:
+    """
+    Per-test override for ``GRADING_SAMPLES_PER_MODEL`` (instance attribute only).
+
+    Default when env unset: **1** (fast). Set ``from_config`` to use ``Config`` from ``.env``.
+    """
+    raw = os.getenv("MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES", "").strip()
+    if raw == "":
+        cfg.GRADING_SAMPLES_PER_MODEL = 1
+        return
+    if raw.lower() in ("from_config", "use_config", "config"):
+        return
+    try:
+        k = int(raw, 10)
+    except ValueError:
+        cfg.GRADING_SAMPLES_PER_MODEL = 1
+        return
+    cfg.GRADING_SAMPLES_PER_MODEL = max(1, min(k, 16))
+
+
 def _build_artifacts(paths: list[Path]) -> dict[str, bytes]:
     artifacts: dict[str, bytes] = {}
     for p in paths:
@@ -328,9 +417,12 @@ def _build_artifacts(paths: list[Path]) -> dict[str, bytes]:
     "Create directories assignments_to_grade/ and rubric/ at the repository root.",
 )
 class TestGradingPipelineLocalFiles(unittest.TestCase):
-    """Run :func:`run_grading_pipeline` on local assignment + rubric fixtures."""
+    """Run the multimodal grading pipeline on local assignment + rubric fixtures."""
 
     def test_grade_local_assignments_write_json(self) -> None:
+        # Bind in function scope so subtests always see it (avoids NameError if a module-level import is missing).
+        from app.grading.llm_router import build_grading_clients
+
         groups = _assignment_groups()
         if not groups:
             self.skipTest(
@@ -347,10 +439,22 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                 "or per-assignment rubric files under rubric/."
             )
 
+        max_assign = _multimodal_local_test_max_assignments()
+        if max_assign is not None and len(groups) > max_assign:
+            sorted_pairs = sorted(groups.items())
+            groups = dict(sorted_pairs[:max_assign])
+            logging.getLogger(__name__).warning(
+                "Grading %s of %s assignment basename(s). Default cap: "
+                "MULTIMODAL_LOCAL_TEST_MAX_ASSIGNMENTS=1. Set to 0 or all to grade every file.",
+                len(groups),
+                len(sorted_pairs),
+            )
+
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         RAG_DIR.mkdir(parents=True, exist_ok=True)
         _skip_if_no_local_llm()
         cfg = Config()
+        _multimodal_local_test_grading_samples_override(cfg)
         if not _ollama_reachable_quick(cfg):
             raise unittest.SkipTest(
                 "Ollama unreachable at INTERNAL_OLLAMA_URL / OLLAMA_BASE_URL "
@@ -428,12 +532,60 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                     extra={"paths": [str(p.name) for p in paths]},
                 )
 
-                result = run_grading_pipeline(
+                task_desc_parts: list[str] = []
+                if getattr(assignment, "description", None):
+                    task_desc_parts.append(str(assignment.description))
+                if rubric_text:
+                    task_desc_parts.append(rubric_text)
+                task_description = "\n\n".join(task_desc_parts)
+
+                n_models = len(build_grading_clients(cfg))
+                k_samples = max(1, int(getattr(cfg, "GRADING_SAMPLES_PER_MODEL", 1)))
+                n_grading_units = len(build_grading_units_from_chunks(chunks))
+                u_cap = _multimodal_local_test_max_grading_units()
+                if u_cap is not None:
+                    n_grading_units = min(n_grading_units, u_cap)
+                n_calls = n_grading_units * n_models * k_samples
+                chat_to = int(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 300))
+                logging.getLogger(__name__).warning(
+                    "Multimodal grading for %r: ~%s grading unit(s) × %s model(s) × %s sample(s)/model "
+                    "≈ %s sequential /api/chat calls (up to %ss each).",
+                    stem,
+                    n_grading_units,
+                    n_models,
+                    k_samples,
+                    n_calls,
+                    chat_to,
+                )
+
+                rubric_rows_by_type = {RubricType.FREE_RESPONSE: rubric_list}
+                pipeline = create_multimodal_pipeline_from_app_config(
                     cfg,
-                    assignment,
-                    artifacts,
-                    rubric_text=rubric_text,
-                    answer_key_text=None,
+                    rubric_rows_by_type=rubric_rows_by_type,
+                    task_description=task_description,
+                )
+                modality_hints = {
+                    "max_chunk_chars": max(2000, min(chunk_cap, 12000)),
+                    "modality_subtype": str(
+                        modality_profile.get("modality_subtype") or ""
+                    ),
+                }
+                unit_cap = _multimodal_local_test_max_grading_units()
+                if unit_cap is not None:
+                    modality_hints["max_grading_units"] = unit_cap
+
+                envelope = ingest_raw_submission(
+                    assignment_id=stem,
+                    student_id="local_test",
+                    artifacts={k: "<local_fixture>" for k in sorted(artifacts.keys())},
+                    extracted_plaintext=plain,
+                    modality_hints=modality_hints,
+                )
+                mm_result = pipeline.run(envelope)
+                result = multimodal_assignment_to_grading_dict(
+                    mm_result,
+                    rubric=rubric_list,
+                    modality_profile=modality_profile,
                 )
 
                 validated = validate_grading_output(result)
