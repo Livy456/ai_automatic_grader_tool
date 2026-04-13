@@ -226,5 +226,7 @@ AGT_platform/
 # Step 2: Pull chat models
 - ollama pull llama3.2:3b
 - ollama pull nomic-embed-text
+- ollama pull phi3.5:3.8b
+- ollama pull deepseek-r1:1.5b
 
 # 

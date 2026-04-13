@@ -15,6 +15,7 @@ from .schemas import AssignmentGradeResult, ChunkGradeOutcome
 def _merge_criteria_max_by_name(
     question_grades: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Pick the highest-scoring row per criterion name, preserving justification."""
     best: dict[str, dict[str, Any]] = {}
     for qg in question_grades:
         for c in qg.get("criteria") or []:
@@ -85,25 +86,40 @@ def _coerce_rubric_items(rubric: list) -> list[dict[str, Any]]:
 def _chunk_to_question_grade(
     chunk: ChunkGradeOutcome, max_by_name: dict[str, float]
 ) -> dict[str, Any]:
+    aux = chunk.auxiliary or {}
+    just_map: dict[str, str] = aux.get("criterion_justifications") or {}
+    conf_note: str = aux.get("confidence_note") or ""
+
     criteria_rows: list[dict[str, Any]] = []
     for name, ratio in (chunk.criterion_consensus or {}).items():
         mp = float(max_by_name.get(name) or 100.0)
         ratio_f = max(0.0, min(1.0, float(ratio)))
-        criteria_rows.append(
-            {
-                "name": name,
-                "score": round(ratio_f * mp, 4),
-                "max_points": mp,
-                "confidence": round(float(chunk.ai_confidence), 4),
-            }
-        )
+        row: dict[str, Any] = {
+            "name": name,
+            "score": round(ratio_f * mp, 4),
+            "max_points": mp,
+            "confidence": round(float(chunk.ai_confidence), 4),
+        }
+        j = just_map.get(name) or ""
+        if j:
+            row["justification"] = j
+        criteria_rows.append(row)
+
+    evidence_parts: list[str] = []
+    if conf_note:
+        evidence_parts.append(conf_note)
+    for j_text in just_map.values():
+        if j_text and j_text not in evidence_parts:
+            evidence_parts.append(j_text)
+    evidence_summary = " | ".join(evidence_parts)[:4000] if evidence_parts else ""
+
     return {
         "chunk_id": chunk.chunk_id,
         "criteria": criteria_rows,
         "overall": {
             "score": float(chunk.normalized_score_estimate),
             "confidence": round(float(chunk.ai_confidence), 4),
-            "summary": "",
+            "summary": evidence_summary,
             "semantic_entropy": round(float(chunk.semantic_entropy_nats), 4),
             "ai_confidence": round(float(chunk.ai_confidence), 4),
             "entropy_max_reference_nats": round(

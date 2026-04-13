@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any, Protocol
 
@@ -90,11 +91,13 @@ class OllamaClient:
         *,
         request_json_format: bool = True,
         timeout_sec: float = 300.0,
+        keep_alive: str | None = None,
     ):
         self.base_url = (base_url or "").rstrip("/")
         self.model = model
         self._request_json_format = request_json_format
         self._timeout_sec = float(timeout_sec)
+        self._keep_alive = keep_alive
 
     def chat_json(
         self, messages: list[dict], *, temperature: float | None = None
@@ -106,6 +109,8 @@ class OllamaClient:
         }
         if self._request_json_format:
             body["format"] = "json"
+        if self._keep_alive is not None:
+            body["keep_alive"] = self._keep_alive
         if temperature is not None:
             body["options"] = {"temperature": float(temperature)}
         r = requests.post(
@@ -143,6 +148,16 @@ class OpenAIJsonClient:
         return parse_llm_json_content(content)
 
 
+def _ollama_keep_alive(cfg: Config) -> str | None:
+    """Return ``keep_alive`` value for Ollama requests.
+
+    When ``OLLAMA_KEEP_ALIVE`` is set (e.g. ``"0s"``), Ollama unloads the model
+    immediately after responding, freeing VRAM/RAM for the next model.  Essential
+    on memory-constrained machines running multiple grading models sequentially.
+    """
+    return getattr(cfg, "OLLAMA_KEEP_ALIVE", None) or os.getenv("OLLAMA_KEEP_ALIVE") or None
+
+
 def primary_ollama_client(cfg: Config) -> OllamaClient:
     base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip()
     model = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
@@ -152,6 +167,7 @@ def primary_ollama_client(cfg: Config) -> OllamaClient:
         model,
         request_json_format=getattr(cfg, "OLLAMA_CHAT_JSON_FORMAT", True),
         timeout_sec=to,
+        keep_alive=_ollama_keep_alive(cfg),
     )
 
 
@@ -189,6 +205,7 @@ def _parse_model_spec(spec: str, cfg: Config) -> tuple[ChatClient, str] | None:
             model_name,
             request_json_format=getattr(cfg, "OLLAMA_CHAT_JSON_FORMAT", True),
             timeout_sec=to,
+            keep_alive=_ollama_keep_alive(cfg),
         ),
         f"ollama:{model_name}",
     )

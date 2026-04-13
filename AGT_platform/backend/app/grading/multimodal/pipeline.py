@@ -120,9 +120,20 @@ class MultimodalGradingPipeline:
             parsed_samples: list[SampledChunkGrade] = []
             cluster_counts: Counter[str] = Counter()
 
+            rubric_mx: dict[str, float] = {}
+            for rr in chunk.rubric_rows or []:
+                rn = str(rr.get("name") or "").strip()
+                if rn:
+                    try:
+                        rubric_mx[rn] = float(rr.get("max_points") or rr.get("max_score") or 0)
+                    except (TypeError, ValueError):
+                        pass
+
             strong = bool(self.config.confidence_clustering_strong_pattern)
             for s in raw_samples:
-                parsed, warns = parse_chunk_grade_json(s.raw_text)
+                parsed, warns = parse_chunk_grade_json(
+                    s.raw_text, rubric_max_points=rubric_mx,
+                )
                 parse_ok = parsed is not None
                 pw = list(warns)
                 ck: str | None = cluster_assignment(

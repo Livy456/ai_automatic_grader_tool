@@ -230,6 +230,43 @@ def _flatten_sections_rubric(raw: dict) -> list[dict]:
     return out
 
 
+_SECTION_NAME_TO_RUBRIC_TYPE = {
+    "Scaffolded Coding": RubricType.PROGRAMMING_SCAFFOLDED,
+    "Free Response": RubricType.FREE_RESPONSE,
+    "Open-Ended EDA": RubricType.EDA_VISUALIZATION,
+    "Mock Interview / Oral Assessment": RubricType.ORAL_INTERVIEW,
+}
+
+
+def _build_rubric_rows_by_type(rubric_json: dict) -> dict[RubricType, list[dict]]:
+    """Map each rubric section to its RubricType with only that section's criteria."""
+    by_type: dict[RubricType, list[dict]] = {}
+    for sec in rubric_json.get("sections") or []:
+        if not isinstance(sec, dict):
+            continue
+        sec_name = str(sec.get("name") or "").strip()
+        rt = _SECTION_NAME_TO_RUBRIC_TYPE.get(sec_name)
+        if rt is None:
+            continue
+        rows: list[dict] = []
+        for c in sec.get("criteria") or []:
+            if not isinstance(c, dict):
+                continue
+            name = str(c.get("name") or "Criterion").strip()
+            max_pts = _max_points_from_range(c.get("points_range"))
+            levels = c.get("levels")
+            desc = json.dumps(levels, ensure_ascii=False) if isinstance(levels, dict) else ""
+            rows.append({
+                "name": name,
+                "max_points": max_pts,
+                "criterion": name,
+                "max_score": max_pts,
+                "description": desc,
+            })
+        by_type[rt] = rows
+    return by_type
+
+
 def _parse_rubric_json_document(data: str) -> tuple[list[dict], str | None]:
     """
     Parse rubric JSON into criterion rows and optional instructor prose.
@@ -311,6 +348,18 @@ def _try_load_generic_rubric() -> tuple[list[dict], str | None] | None:
     return None
 
 
+def _try_load_generic_rubric_raw_json() -> dict | None:
+    """Return the raw parsed JSON dict from the first generic rubric found (or None)."""
+    for base in _GENERIC_BASENAMES:
+        json_path = RUBRIC_DIR / f"{base}.json"
+        if json_path.is_file():
+            try:
+                return json.loads(json_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
 def _load_rubric_for_stem(stem: str) -> tuple[list[dict], str | None]:
     """
     Resolve ``rubric/<stem>.{json,md,txt}`` (per-assignment rubric).
@@ -383,6 +432,14 @@ def _multimodal_local_test_grading_samples_override(cfg: Config) -> None:
     Per-test override for ``GRADING_SAMPLES_PER_MODEL`` (instance attribute only).
 
     Default when env unset: **1** (fast). Set ``from_config`` to use ``Config`` from ``.env``.
+
+    .. note::
+
+       Meaningful semantic entropy requires **k >= 3** samples (ideally from 2+ models).
+       With k=1, entropy is always 0 and ai_confidence is always 1.0 — this is by design
+       for fast test iteration, not a bug. To get real confidence signal, set
+       ``MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES=3`` (or higher) and optionally configure
+       ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` in ``.env``.
     """
     raw = os.getenv("MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES", "").strip()
     if raw == "":
@@ -555,7 +612,11 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                     chat_to,
                 )
 
-                rubric_rows_by_type = {RubricType.FREE_RESPONSE: rubric_list}
+                raw_json = _try_load_generic_rubric_raw_json()
+                if raw_json and isinstance(raw_json.get("sections"), list):
+                    rubric_rows_by_type = _build_rubric_rows_by_type(raw_json)
+                else:
+                    rubric_rows_by_type = {RubricType.FREE_RESPONSE: rubric_list}
                 pipeline = create_multimodal_pipeline_from_app_config(
                     cfg,
                     rubric_rows_by_type=rubric_rows_by_type,

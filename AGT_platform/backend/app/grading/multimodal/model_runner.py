@@ -35,13 +35,28 @@ class ChunkModelRunner(Protocol):
     ) -> list[SampledChunkGrade]: ...
 
 
+_DEFAULT_MOCK_RESPONSE = json.dumps({
+    "rubric_type": "free_response",
+    "criterion_scores": [
+        {"name": "Conceptual Correctness", "score": 3, "max_points": 4},
+        {"name": "Evidence & Justification", "score": 2, "max_points": 3},
+    ],
+    "criterion_justifications": [
+        "Student demonstrates solid understanding of the core concept with minor gaps.",
+        "Two concrete examples cited from the reading; could be more specific.",
+    ],
+    "total_score": 5,
+    "normalized_score": 0.71,
+    "confidence_note": "Evidence is clear for both criteria.",
+    "review_flag": False,
+})
+
+
 class MockChunkModelRunner:
     """Deterministic stub for tests."""
 
     def __init__(self, responses: list[str] | None = None):
-        self._responses = responses or [
-            '{"normalized_score":0.8,"total_score":8,"criterion_scores":[],"criterion_justifications":[],"rubric_type":"free_response","confidence_note":"","review_flag":false}'
-        ]
+        self._responses = responses or [_DEFAULT_MOCK_RESPONSE]
 
     def run_chunk_samples(
         self,

@@ -23,7 +23,17 @@ def _coerce_rubric_type(val: Any) -> RubricType | str:
     return s or "unknown"
 
 
-def parse_chunk_grade_json(raw: str) -> tuple[ParsedChunkGrade | None, list[str]]:
+def parse_chunk_grade_json(
+    raw: str,
+    *,
+    rubric_max_points: dict[str, float] | None = None,
+) -> tuple[ParsedChunkGrade | None, list[str]]:
+    """Parse LLM JSON into ``ParsedChunkGrade``.
+
+    ``rubric_max_points`` maps criterion name → max_points from the rubric
+    so that dict-format ``criterion_scores`` (where the LLM omits max_points)
+    can still resolve correct score ratios.
+    """
     warnings: list[str] = []
     s = (raw or "").strip()
     if not s:
@@ -37,11 +47,22 @@ def parse_chunk_grade_json(raw: str) -> tuple[ParsedChunkGrade | None, list[str]
     if not isinstance(obj, dict):
         return None, ["top_level_not_object"]
 
+    rubric_max: dict[str, float] = dict(rubric_max_points or {})
+
     crit_raw = obj.get("criterion_scores") or obj.get("criteria") or []
+
+    if isinstance(crit_raw, dict):
+        crit_raw = [
+            {"name": str(k), "score": v}
+            for k, v in crit_raw.items()
+        ]
+        warnings.append("criterion_scores_was_dict")
+
     if not isinstance(crit_raw, list):
         crit_raw = []
 
     c_scores: list[CriterionScore] = []
+    inline_justifications: list[str] = []
     for i, row in enumerate(crit_raw):
         if not isinstance(row, dict):
             warnings.append(f"criterion_{i}_not_dict")
@@ -49,7 +70,12 @@ def parse_chunk_grade_json(raw: str) -> tuple[ParsedChunkGrade | None, list[str]
         name = str(row.get("name") or row.get("criterion") or f"criterion_{i}")
         try:
             score = float(row.get("score", 0))
-            mx = float(row.get("max_points") or row.get("max_score") or 0)
+            mx = float(
+                row.get("max_points")
+                or row.get("max_score")
+                or rubric_max.get(name)
+                or 0
+            )
         except (TypeError, ValueError):
             warnings.append(f"criterion_{i}_non_numeric")
             score, mx = 0.0, 0.0
@@ -58,14 +84,22 @@ def parse_chunk_grade_json(raw: str) -> tuple[ParsedChunkGrade | None, list[str]
         except (TypeError, ValueError):
             w = 1.0
         c_scores.append(CriterionScore(name=name, score=score, max_points=mx, weight=w))
+        ij = str(row.get("justification") or row.get("reason") or row.get("explanation") or "")
+        inline_justifications.append(ij)
 
     just = obj.get("criterion_justifications")
     if isinstance(just, list):
         just_list = [str(x) for x in just]
     elif isinstance(just, dict):
-        just_list = [f"{k}: {v}" for k, v in just.items()]
+        just_list = [str(just.get(cs.name, "")) for cs in c_scores] if c_scores else [
+            f"{k}: {v}" for k, v in just.items()
+        ]
     else:
         just_list = [str(just)] if just else []
+
+    if not just_list and any(inline_justifications):
+        just_list = inline_justifications
+        warnings.append("justifications_from_inline_criterion_fields")
 
     try:
         total = float(obj.get("total_score", 0))

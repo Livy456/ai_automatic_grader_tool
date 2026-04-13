@@ -19,6 +19,32 @@ from .schemas import (
 )
 
 
+def _pick_representative_justifications(
+    valid_parsed: list[SampledChunkGrade],
+    consensus_score: float,
+) -> tuple[dict[str, str], str]:
+    """Select justifications from the sample closest to the consensus score.
+
+    Returns (criterion_name -> justification, confidence_note).
+    """
+    if not valid_parsed:
+        return {}, ""
+    best = min(
+        valid_parsed,
+        key=lambda s: abs((s.parsed.normalized_score if s.parsed else 0.0) - consensus_score),
+    )
+    p = best.parsed
+    if p is None:
+        return {}, ""
+    just_map: dict[str, str] = {}
+    for i, cs in enumerate(p.criterion_scores):
+        if i < len(p.criterion_justifications):
+            just_map[cs.name] = p.criterion_justifications[i]
+        else:
+            just_map[cs.name] = ""
+    return just_map, p.confidence_note
+
+
 def consensus_normalized_score(
     scores: Sequence[float],
     *,
@@ -58,11 +84,10 @@ def aggregate_chunk_samples(
         mode=cfg.chunk_score_aggregator,
     )
 
-    crit_maps = [
-        criterion_ratios(s.parsed)  # type: ignore[arg-type]
-        for s in samples
-        if s.parse_ok and s.parsed is not None
+    valid_parsed = [
+        s for s in samples if s.parse_ok and s.parsed is not None
     ]
+    crit_maps = [criterion_ratios(s.parsed) for s in valid_parsed]  # type: ignore[arg-type]
     # mean ratio per criterion name
     from collections import defaultdict
 
@@ -71,6 +96,10 @@ def aggregate_chunk_samples(
         for k, v in m.items():
             acc[k].append(v)
     consensus_crit = {k: sum(vs) / len(vs) for k, vs in acc.items()}
+
+    justifications, confidence_note = _pick_representative_justifications(
+        valid_parsed, estimate,
+    )
 
     n = max(1, len(samples))
     parse_fail_rate = sum(1 for s in samples if not s.parse_ok) / n
@@ -91,6 +120,8 @@ def aggregate_chunk_samples(
         "parse_fail_rate": parse_fail_rate,
         "review_flag_rate": review_flag_rate,
         "question_point_weight": float(question_point_weight),
+        "criterion_justifications": justifications,
+        "confidence_note": confidence_note,
     }
 
     return ChunkGradeOutcome(
