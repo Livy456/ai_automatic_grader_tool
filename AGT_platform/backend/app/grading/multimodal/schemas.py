@@ -120,6 +120,7 @@ class ParsedChunkGrade:
     normalized_score: float
     confidence_note: str = ""
     review_flag: bool = False
+    criterion_evidence: list[str] = field(default_factory=list)
     parse_warnings: list[str] = field(default_factory=list)
 
 

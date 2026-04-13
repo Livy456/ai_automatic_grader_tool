@@ -52,10 +52,15 @@ def parse_chunk_grade_json(
     crit_raw = obj.get("criterion_scores") or obj.get("criteria") or []
 
     if isinstance(crit_raw, dict):
-        crit_raw = [
-            {"name": str(k), "score": v}
-            for k, v in crit_raw.items()
-        ]
+        expanded: list[dict[str, Any]] = []
+        for k, v in crit_raw.items():
+            if isinstance(v, dict):
+                row = dict(v)
+                row.setdefault("name", str(k))
+            else:
+                row = {"name": str(k), "score": v}
+            expanded.append(row)
+        crit_raw = expanded
         warnings.append("criterion_scores_was_dict")
 
     if not isinstance(crit_raw, list):
@@ -63,6 +68,7 @@ def parse_chunk_grade_json(
 
     c_scores: list[CriterionScore] = []
     inline_justifications: list[str] = []
+    inline_evidence: list[str] = []
     for i, row in enumerate(crit_raw):
         if not isinstance(row, dict):
             warnings.append(f"criterion_{i}_not_dict")
@@ -86,6 +92,18 @@ def parse_chunk_grade_json(
         c_scores.append(CriterionScore(name=name, score=score, max_points=mx, weight=w))
         ij = str(row.get("justification") or row.get("reason") or row.get("explanation") or "")
         inline_justifications.append(ij)
+        ev_raw = row.get("evidence") or ""
+        if isinstance(ev_raw, dict):
+            parts = []
+            for q in ev_raw.get("quotes") or []:
+                parts.append(str(q))
+            notes = str(ev_raw.get("notes") or "")
+            if notes:
+                parts.append(notes)
+            ev_str = " | ".join(parts)
+        else:
+            ev_str = str(ev_raw)
+        inline_evidence.append(ev_str)
 
     just = obj.get("criterion_justifications")
     if isinstance(just, list):
@@ -133,6 +151,7 @@ def parse_chunk_grade_json(
         normalized_score=float(norm),
         confidence_note=conf,
         review_flag=rf,
+        criterion_evidence=inline_evidence,
         parse_warnings=list(warnings),
     )
     return parsed, warnings

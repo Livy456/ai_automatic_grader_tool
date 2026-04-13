@@ -177,7 +177,7 @@ class Config:
     # k samples per configured grading model; capped to limit cost. k=1 disables sampling path.
     GRADING_SAMPLES_PER_MODEL = max(
         1,
-        min(_env_int("GRADING_SAMPLES_PER_MODEL", default=1), 16),
+        min(_env_int("GRADING_SAMPLES_PER_MODEL", default=3), 16),
     )
     # Temperature for grade() when entropy sampling is active (k>1). Ollama/OpenAI both support.
     GRADING_SAMPLE_TEMPERATURE = max(

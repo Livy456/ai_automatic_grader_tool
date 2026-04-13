@@ -4,8 +4,13 @@ Tests for the multimodal grading pipeline.
 - **Unit tests** (routing, entropy, mock pipeline): fast, no LLM required.
 - **Integration test** (``LocalAssignmentGradingTests``): grades every file in
   ``assignments_to_grade/`` using the real rubric from ``rubric/default.json``
-  and real LLM calls (Ollama llama3.2:3b + gemma3, plus OpenAI when
-  ``OPENAI_API_KEY`` is set).  Saves per-assignment:
+  and real LLM calls via three local Ollama models:
+
+  1. ``llama3.2:3b`` (primary — also performs LLM-based chunking)
+  2. ``phi3.5:3.8b``
+  3. ``deepseek-r1:1.5b``
+
+  Saves per-assignment:
 
   - ``grading_output/<stem>_grade_output.json``
   - ``RAG_embedding/<stem>_chunks.json``
@@ -245,21 +250,28 @@ def _configure_for_integration_test(cfg: Config) -> None:
 
     3 samples per model at temperature 0.4 → 9 samples per chunk.
     Timeout raised to 600s for cold model loads on laptops.
+
+    All overrides are **unconditional** so that stale values from parent
+    ``.env`` files or host env vars never leak through.
     """
     # --- Chunking: llama3.2:3b only ---
     os.environ["MULTIMODAL_OLLAMA_QA_SEGMENT"] = "on"
     os.environ["MULTIMODAL_QA_SEGMENT_MODEL"] = "llama3.2:3b"
 
-    # --- Memory: Option A — one model loaded at a time (no swap on 24 GB) ---
+    # --- Memory: one model loaded at a time (no swap on 24 GB) ---
+    # keep_alive="5m" lets consecutive samples reuse the loaded model
+    # (3 cold loads per chunk instead of 9 with "0s").
     os.environ["OLLAMA_MAX_LOADED_MODELS"] = "1"
-    cfg.OLLAMA_KEEP_ALIVE = "0s"
+    cfg.OLLAMA_KEEP_ALIVE = "5m"
 
-    # --- Grading: 3 models ---
-    if not getattr(cfg, "GRADING_MODEL_2", "").strip():
-        cfg.GRADING_MODEL_2 = "ollama:phi3.5:3.8b"
-    if not getattr(cfg, "GRADING_MODEL_3", "").strip():
-        cfg.GRADING_MODEL_3 = "ollama:deepseek-r1:1.5b"
+    # --- Primary model ---
+    cfg.OLLAMA_MODEL = "llama3.2:3b"
+    cfg.OLLAMA_BASE_URL = cfg.OLLAMA_BASE_URL or "http://localhost:11434"
+    cfg.INTERNAL_OLLAMA_URL = cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL
 
+    # --- Grading: 3 models (unconditional) ---
+    cfg.GRADING_MODEL_2 = "ollama:phi3.5:3.8b"
+    cfg.GRADING_MODEL_3 = "ollama:deepseek-r1:1.5b"
     cfg.OPENAI_API_KEY = ""
 
     cfg.OLLAMA_CHAT_TIMEOUT_SEC = max(
@@ -388,8 +400,8 @@ class MultimodalPipelineRunTests(unittest.TestCase):
 class LocalAssignmentGradingTests(unittest.TestCase):
     """Grade every assignment in ``assignments_to_grade/`` using real LLM calls.
 
-    Uses ``rubric/default.json`` (per-section rubric), Ollama llama3.2:3b + gemma3
-    (and OpenAI gpt-4o-mini when ``OPENAI_API_KEY`` is set).
+    Uses ``rubric/default.json`` (per-section rubric) and three local Ollama models:
+    llama3.2:3b, phi3.5:3.8b, deepseek-r1:1.5b (no OpenAI).
 
     For each assignment the test:
 
@@ -424,11 +436,28 @@ class LocalAssignmentGradingTests(unittest.TestCase):
 
         if not _ollama_reachable(cls.cfg):
             raise unittest.SkipTest(
-                "Ollama not reachable. Start with `ollama serve` or set SKIP_LOCAL_LLM_TESTS=true."
+                "Ollama not reachable at "
+                f"{cls.cfg.OLLAMA_BASE_URL!r}. Start with `ollama serve`."
             )
         ok, detail = _ollama_chat_smoke(cls.cfg)
         if not ok:
             raise unittest.SkipTest(f"Ollama chat smoke failed: {detail}")
+
+        _required_models = ["llama3.2:3b", "phi3.5:3.8b", "deepseek-r1:1.5b"]
+        base = (cls.cfg.INTERNAL_OLLAMA_URL or cls.cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
+        try:
+            tags_resp = requests.get(f"{base}/api/tags", timeout=5).json()
+            local_models = {
+                m["name"] for m in tags_resp.get("models", [])
+            }
+            missing = [m for m in _required_models if m not in local_models]
+            if missing:
+                raise unittest.SkipTest(
+                    f"Required Ollama model(s) not pulled: {missing}. "
+                    f"Run: {' && '.join(f'ollama pull {m}' for m in missing)}"
+                )
+        except (requests.RequestException, KeyError, ValueError):
+            pass
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         RAG_DIR.mkdir(parents=True, exist_ok=True)
@@ -436,6 +465,11 @@ class LocalAssignmentGradingTests(unittest.TestCase):
         from app.grading.llm_router import build_grading_clients
         clients = build_grading_clients(cls.cfg)
         cls._model_labels = [label for _, label in clients]
+        if len(clients) < 3:
+            raise unittest.SkipTest(
+                f"Expected 3 grading clients, got {len(clients)}: "
+                f"{cls._model_labels}. Check GRADING_MODEL_2/GRADING_MODEL_3."
+            )
         _log.warning(
             "Integration test: %d model(s): %s, samples_per_model=%d",
             len(clients),
@@ -525,22 +559,31 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                # Check justifications are present and content-specific
+                # Check justifications + evidence are present and content-specific
                 chunk_summaries: list[str] = []
                 all_justifications: list[str] = []
+                all_evidence: list[str] = []
                 for qg in validated["question_grades"]:
                     summary = qg.get("overall", {}).get("summary", "")
                     chunk_summaries.append(summary)
+                    self.assertNotIn(
+                        "ai_confidence", qg,
+                        f"[{stem}] question_grade should not have top-level ai_confidence",
+                    )
                     for c in qg.get("criteria") or []:
                         j = c.get("justification", "")
                         if j:
                             all_justifications.append(j)
+                        ev = c.get("evidence", "")
+                        if ev:
+                            all_evidence.append(ev)
 
                 n_crit = len(validated.get("criteria") or [])
                 _log.warning(
-                    "  %s: score=%.3f, chunks=%d, criteria=%d, justifications=%d",
+                    "  %s: score=%.3f, chunks=%d, criteria=%d, justifications=%d, evidence=%d",
                     stem, validated["overall"]["score"],
-                    len(result.chunk_results), n_crit, len(all_justifications),
+                    len(result.chunk_results), n_crit,
+                    len(all_justifications), len(all_evidence),
                 )
 
                 if len(result.chunk_results) > 1:

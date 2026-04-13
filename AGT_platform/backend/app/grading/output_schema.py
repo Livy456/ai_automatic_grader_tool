@@ -279,10 +279,8 @@ def validate_grading_output(data: dict[str, Any]) -> dict[str, Any]:
         elif c.get("max_points") is not None:
             c["max_points"] = _coerce_float(c["max_points"])
         ev = c.get("evidence")
-        if isinstance(ev, str):
-            c["evidence"] = {"quotes": [], "notes": ev}
-        elif ev is not None and not isinstance(ev, dict):
-            c["evidence"] = {"quotes": [], "notes": str(ev)}
+        if ev is not None and not isinstance(ev, (str, dict)):
+            c["evidence"] = str(ev)
         criteria_out.append(c)
     data["criteria"] = criteria_out
 

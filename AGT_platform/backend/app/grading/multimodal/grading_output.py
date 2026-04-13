@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.grading.aggregation import weighted_overall_confidence, weighted_overall_score
+from app.grading.consistency_rules import run_rule_checks
 
 from .schemas import AssignmentGradeResult, ChunkGradeOutcome
 
@@ -15,7 +16,7 @@ from .schemas import AssignmentGradeResult, ChunkGradeOutcome
 def _merge_criteria_max_by_name(
     question_grades: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Pick the highest-scoring row per criterion name, preserving justification."""
+    """Pick the highest-scoring row per criterion name, preserving justification and evidence."""
     best: dict[str, dict[str, Any]] = {}
     for qg in question_grades:
         for c in qg.get("criteria") or []:
@@ -88,7 +89,10 @@ def _chunk_to_question_grade(
 ) -> dict[str, Any]:
     aux = chunk.auxiliary or {}
     just_map: dict[str, str] = aux.get("criterion_justifications") or {}
+    ev_map: dict[str, str] = aux.get("criterion_evidence") or {}
     conf_note: str = aux.get("confidence_note") or ""
+
+    se_confidence = round(float(chunk.ai_confidence), 4)
 
     criteria_rows: list[dict[str, Any]] = []
     for name, ratio in (chunk.criterion_consensus or {}).items():
@@ -98,11 +102,14 @@ def _chunk_to_question_grade(
             "name": name,
             "score": round(ratio_f * mp, 4),
             "max_points": mp,
-            "confidence": round(float(chunk.ai_confidence), 4),
+            "confidence": se_confidence,
         }
         j = just_map.get(name) or ""
         if j:
             row["justification"] = j
+        ev = ev_map.get(name) or ""
+        if ev:
+            row["evidence"] = ev
         criteria_rows.append(row)
 
     evidence_parts: list[str] = []
@@ -118,17 +125,14 @@ def _chunk_to_question_grade(
         "criteria": criteria_rows,
         "overall": {
             "score": float(chunk.normalized_score_estimate),
-            "confidence": round(float(chunk.ai_confidence), 4),
+            "confidence": se_confidence,
             "summary": evidence_summary,
             "semantic_entropy": round(float(chunk.semantic_entropy_nats), 4),
-            "ai_confidence": round(float(chunk.ai_confidence), 4),
             "entropy_max_reference_nats": round(
                 float(chunk.entropy_max_reference_nats), 6
             ),
         },
         "semantic_entropy": float(chunk.semantic_entropy_nats),
-        "ai_confidence": float(chunk.ai_confidence),
-        "entropy_max_reference_nats": float(chunk.entropy_max_reference_nats),
         "review_status": chunk.review_status.value,
         "review_reasons": list(chunk.review_reasons),
         "flags": [],
@@ -145,10 +149,10 @@ def multimodal_assignment_to_grading_dict(
     Build a dict suitable for :func:`~app.grading.output_schema.validate_grading_output`.
 
     Criteria are merged across chunks with **max** score per criterion name (same idea
-    as chunk-entropy assignment merge).     ``overall.confidence`` and ``overall.assignment_ai_confidence`` are the weighted
-    mean of chunk-level **Conf_AI** (inverse normalized semantic entropy over grading
-    clusters), not derived from the assignment score. ``overall.mean_chunk_semantic_entropy_nats``
-    is the mean of raw chunk entropies for diagnostics.
+    as chunk-entropy assignment merge).  ``overall.confidence`` is the weighted mean of
+    chunk-level semantic-entropy-derived confidence (inverse normalized entropy over
+    grading clusters).  ``overall.mean_chunk_semantic_entropy_nats`` is the mean of raw
+    chunk entropies for diagnostics.
     """
     rubric_items = _coerce_rubric_items(rubric)
     max_by_name = {r["name"]: float(r["max_points"]) for r in rubric_items}
@@ -156,14 +160,28 @@ def multimodal_assignment_to_grading_dict(
     question_grades = [
         _chunk_to_question_grade(c, max_by_name) for c in result.chunk_results
     ]
+
+    # --- Consistency checks per chunk ---
+    all_consistency_issues: list[str] = []
+    for qg in question_grades:
+        issues = run_rule_checks(qg.get("criteria") or [])
+        if issues:
+            qg["flags"] = list(dict.fromkeys(qg.get("flags", []) + issues))
+            all_consistency_issues.extend(issues)
+
     merged = _merge_criteria_max_by_name(question_grades)
     _apply_rubric_weights_to_criteria(merged, rubric_items)
+
+    # --- Consistency checks on merged assignment-level criteria ---
+    assignment_issues = run_rule_checks(merged)
+    all_consistency_issues.extend(assignment_issues)
+
     overall_score = weighted_overall_score(merged)
     wconf = weighted_overall_confidence(merged)
 
     entropies = [float(c.semantic_entropy_nats) for c in result.chunk_results]
     avg_h = sum(entropies) / len(entropies) if entropies else 0.0
-    assignment_ai_conf = float(getattr(result, "assignment_ai_confidence", 0.0))
+    assignment_conf = float(getattr(result, "assignment_ai_confidence", 0.0))
 
     model_ids: list[str] = []
     audit = (result.stage_artifacts or {}).get("pipeline_audit") or {}
@@ -184,22 +202,27 @@ def multimodal_assignment_to_grading_dict(
         for c in result.chunk_results
     )[:4000]
 
+    flags = ["multimodal_pipeline", f"review_{result.review_status.value}"]
+    if all_consistency_issues:
+        flags.append("consistency_issues_detected")
+
     out: dict[str, Any] = {
         "overall": {
             "score": overall_score,
-            "confidence": round(assignment_ai_conf, 4),
+            "confidence": round(assignment_conf, 4),
             "summary": summary,
             "semantic_entropy": round(avg_h, 4),
-            "assignment_ai_confidence": round(assignment_ai_conf, 4),
             "mean_chunk_semantic_entropy_nats": round(avg_h, 4),
             "criteria_confidence_weighted_mean": round(wconf, 4),
         },
         "criteria": crit_out,
-        "flags": ["multimodal_pipeline", f"review_{result.review_status.value}"],
+        "flags": flags,
         "question_grades": question_grades,
         "_multimodal_pipeline_audit": result.stage_artifacts,
         "_assignment_review_status": result.review_status.value,
     }
+    if all_consistency_issues:
+        out["_consistency_issues"] = list(dict.fromkeys(all_consistency_issues))
     if model_ids:
         out["_models_used"] = model_ids
         out["_model_used"] = ", ".join(model_ids)

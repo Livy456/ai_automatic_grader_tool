@@ -29,7 +29,6 @@ JSON schema:
   "score": number,
   "max_points": number,
   "min_points": number,
-  "confidence": number,
   "rationale": "string",
   "evidence": {"quotes": ["string"], "notes": "string"},
   "flags": ["optional flag strings"]
@@ -58,22 +57,24 @@ Use score_override (a number) only when you must replace the score entirely; oth
 
 GRADER = """Grade the submission using the rubric. You MUST:
 - Score each criterion 0..max_points
-- Provide confidence 0..1
-- Provide rationale and cite evidence excerpts.
+- Provide rationale and cite specific evidence excerpts from the student's submission.
+- Be fair and generous: reward what the student demonstrated. When the response reasonably satisfies a rubric level, award that level.
+- Give partial credit for genuine effort. Reserve 0 only for missing or entirely off-topic responses.
 
 If no grading rubric is provided. You MUST:
 - Provide a score from 0 to 100 based on response clarity, depth, and alignment with best responsible data science practices.
+- A sincere, reasonably complete attempt should score at least 60.
 - Provide rationale and cite evidence excerpts.
 
 Output MUST be a single JSON object. Critical: the key must be exactly `overall` (lowercase).
-The value of `overall` MUST be a JSON object `{"score": number, "confidence": number, "summary": "string"}`.
+The value of `overall` MUST be a JSON object `{"score": number, "summary": "string"}`.
 Do NOT set `overall` to a bare number or string. Do NOT use `Overall` or other capitalizations for keys.
 
 JSON schema:
 {
-  "overall": {"score": number, "confidence": number, "summary": "string"},
+  "overall": {"score": number, "summary": "string"},
   "criteria": [
-    {"name":"...", "score": number, "max_points": number, "confidence": number,
+    {"name":"...", "score": number, "max_points": number,
      "rationale":"...", "evidence":{"quotes":[...], "notes":"..."}}
   ],
   "flags": ["needs_review_if_any"]
