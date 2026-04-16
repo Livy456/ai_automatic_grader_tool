@@ -70,10 +70,13 @@ def consensus_normalized_score(
 
 
 def criterion_ratios(parsed: ParsedChunkGrade) -> dict[str, float]:
+    """Per-criterion calibrated credit in ``[0, 1]`` (rubric-anchored, not score/max)."""
     out: dict[str, float] = {}
     for c in parsed.criterion_scores:
-        denom = c.max_points if c.max_points else 1.0
-        out[c.name] = max(0.0, min(1.0, float(c.score) / float(denom)))
+        g = float(getattr(c, "calibrated_credit", 0.0) or 0.0)
+        if g <= 0.0 and c.max_points:
+            g = max(0.0, min(1.0, float(c.score) / float(c.max_points)))
+        out[c.name] = max(0.0, min(1.0, g))
     return out
 
 
@@ -108,6 +111,15 @@ def aggregate_chunk_samples(
             acc[k].append(v)
     consensus_crit = {k: sum(vs) / len(vs) for k, vs in acc.items()}
 
+    acc_raw: dict[str, list[float]] = defaultdict(list)
+    for s in valid_parsed:
+        p = s.parsed
+        if p is None:
+            continue
+        for cs in p.criterion_scores:
+            acc_raw[cs.name].append(float(cs.score))
+    consensus_raw = {k: sum(vs) / len(vs) for k, vs in acc_raw.items()}
+
     justifications, evidence, reasoning, confidence_note = _pick_representative_sample(
         valid_parsed, estimate,
     )
@@ -135,6 +147,7 @@ def aggregate_chunk_samples(
         "criterion_evidence": evidence,
         "criterion_reasoning": reasoning,
         "confidence_note": confidence_note,
+        "criterion_raw_scores": consensus_raw,
     }
 
     return ChunkGradeOutcome(

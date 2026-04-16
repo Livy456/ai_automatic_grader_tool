@@ -1,14 +1,18 @@
 """
 RAG-style chunk embeddings and optional Ollama Q→A segmentation for multimodal grading.
 
-Aligns with :mod:`app.grading.rag_embeddings` (same ``compute_submission_embedding`` order)
-and reuses structured chunking from :func:`app.grading.submission_chunks.build_submission_chunks`
-when heuristic units are used.
+Aligns with :mod:`app.grading.rag_embeddings` (same ``compute_submission_embedding`` order).
 
-When ``MULTIMODAL_OLLAMA_QA_SEGMENT`` is enabled, a **small** Ollama model (default
-``llama3.2:1b`` via ``MULTIMODAL_QA_SEGMENT_MODEL``) returns JSON units with stable ``key``
-fields mapping each question/prompt to its response; on failure the pipeline falls back
-to :func:`default_chunker_build_units`.
+**Chunking stack** (see ``new_chunking_method.md``):
+
+1. Raw **ipynb** bytes → :func:`notebook_chunker.build_notebook_qa_chunks` (cell-order Q/A).
+2. Otherwise **PDF plaintext** is reflowed via
+   :func:`app.grading.submission_chunks.reflow_pdf_sections_in_plaintext` before any LLM
+   segmentation so verticalized extractors do not confuse the model.
+3. If ``MULTIMODAL_OLLAMA_QA_SEGMENT`` is on, Ollama returns JSON Q/A units; on failure,
+   :func:`chunker.default_chunker_build_units` runs structured chunking
+   (:func:`app.grading.submission_chunks.build_submission_chunks`, which reflows each PDF
+   section again and applies journal-style prompt boundaries when hints match).
 """
 
 from __future__ import annotations
@@ -21,8 +25,11 @@ from app.config import Config
 from app.grading.llm_router import OllamaClient
 from app.grading.rag_embeddings import compute_submission_embedding
 
+from app.grading.submission_chunks import reflow_pdf_sections_in_plaintext
+
 from .chunker import default_chunker_build_units, modality_from_hints, task_type_from_hints
 from .ingestion import IngestionEnvelope
+from .notebook_chunker import build_notebook_qa_chunks
 from .schemas import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)
@@ -58,6 +65,12 @@ def _chat_timeout(cfg: Config) -> float:
     return float(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 120))
 
 
+def _qa_segment_http_timeout_sec(cfg: Config) -> float:
+    """HTTP read timeout for Ollama QA segmentation (same order of magnitude as grading)."""
+    raw = float(_chat_timeout(cfg))
+    return min(1200.0, max(45.0, raw))
+
+
 _QA_SYSTEM = """You are a teaching assistant. Split the student's assignment text into separate gradable units.
 Each unit is one question, exercise, or coding problem and the student's answer/response/code that belongs to it.
 Return **only** valid JSON with this shape (no markdown):
@@ -70,7 +83,7 @@ def _chunks_from_ollama_qa_segmentation(
     envelope: IngestionEnvelope,
     cfg: Config,
 ) -> list[GradingChunk] | None:
-    plain = (envelope.extracted_plaintext or "").strip()
+    plain = reflow_pdf_sections_in_plaintext((envelope.extracted_plaintext or "").strip())
     if not plain:
         return None
     base = _ollama_base(cfg)
@@ -81,7 +94,7 @@ def _chunks_from_ollama_qa_segmentation(
         base,
         model,
         request_json_format=getattr(cfg, "OLLAMA_CHAT_JSON_FORMAT", True),
-        timeout_sec=min(180.0, _chat_timeout(cfg)),
+        timeout_sec=_qa_segment_http_timeout_sec(cfg),
     )
     # Full submission text so Q/A segmentation sees the entire document (model context limits may still apply).
     user = plain
@@ -163,19 +176,64 @@ def enrich_chunks_with_rag_embeddings(chunks: list[GradingChunk], cfg: Config) -
         ch.evidence = ev
 
 
+def _get_ipynb_bytes(envelope: IngestionEnvelope) -> bytes | None:
+    """Return raw ipynb bytes from the envelope's artifacts, if present."""
+    raw = (envelope.artifacts or {}).get("ipynb")
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+    return None
+
+
 def build_multimodal_grading_chunks(
     envelope: IngestionEnvelope,
-    cfg: Config,
+    cfg: Config | None = None,
 ) -> tuple[list[GradingChunk], str]:
     """
-    Build grading units: optional Ollama JSON Q/A segmentation, else structured heuristic
-    (``build_submission_chunks`` → ``build_grading_units_from_chunks``).
+    Build grading units using the best available chunker:
+
+    1. **Notebook cell-order** — if the envelope carries raw ipynb bytes,
+       parse cells directly and pair each question heading with the student's
+       response cells (preserves the natural cell ordering).  Does not require
+       ``cfg`` — works on the raw notebook JSON alone.
+    2. **Ollama QA segmentation** — LLM-based JSON segmentation (requires
+       ``cfg``; skipped when ``cfg`` is ``None``).  Plaintext is PDF-reflowed first.
+    3. **Structured heuristic** — :func:`chunker.default_chunker_build_units` on plaintext
+       (PDF reflow + ``build_submission_chunks`` / journal-style boundaries per
+       ``new_chunking_method.md``).
+
+    ``cfg`` may be ``None`` when the pipeline runs without a full application
+    config (e.g. unit tests with a mock runner).  The notebook and heuristic
+    chunkers operate without it; only Ollama QA segmentation is skipped.
     """
-    if multimodal_ollama_qa_segment_enabled():
+    hints = envelope.modality_hints or {}
+    cap = hints.get("max_grading_units")
+    max_units = None
+    if cap is not None:
+        try:
+            max_units = int(cap)
+        except (TypeError, ValueError):
+            pass
+
+    ipynb_bytes = _get_ipynb_bytes(envelope)
+    if ipynb_bytes is not None:
+        nb_chunks = build_notebook_qa_chunks(
+            ipynb_bytes,
+            assignment_id=envelope.assignment_id,
+            student_id=envelope.student_id,
+            modality=modality_from_hints(hints),
+            task_type=task_type_from_hints(hints),
+            max_grading_units=max_units,
+        )
+        if nb_chunks:
+            return nb_chunks, "notebook_cell_order"
+        _log.info("Notebook chunker returned empty; trying other chunkers.")
+
+    if cfg is not None and multimodal_ollama_qa_segment_enabled():
         ollama_units = _chunks_from_ollama_qa_segmentation(envelope, cfg)
         if ollama_units:
             return ollama_units, "ollama_qa_segment"
         _log.info("Ollama QA segmentation disabled or empty; falling back to heuristic chunker.")
+
     hc = default_chunker_build_units(envelope)
     return hc, "structured_heuristic"
 

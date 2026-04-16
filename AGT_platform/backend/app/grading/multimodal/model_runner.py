@@ -147,14 +147,17 @@ class MultiModelChunkRunner:
                 try:
                     obj = client.chat_json(messages, temperature=temp)
                     raw_text = json.dumps(obj, ensure_ascii=True, default=str)
-                except Exception:
+                except Exception as e:
                     _log.warning(
-                        "chunk sample failed chunk_id=%s model=%s rep=%s/%s",
+                        "grading_llm_sample_failed (not chunking): chunk_id=%s model=%s "
+                        "rep=%s/%s: %s: %s",
                         chunk.chunk_id,
                         model_label,
                         _rep + 1,
                         k,
-                        exc_info=True,
+                        type(e).__name__,
+                        e,
+                        exc_info=_log.isEnabledFor(logging.DEBUG),
                     )
                 out.append(
                     SampledChunkGrade(

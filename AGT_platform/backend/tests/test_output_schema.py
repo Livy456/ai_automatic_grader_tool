@@ -100,6 +100,37 @@ class OutputSchemaTests(unittest.TestCase):
         out = validate_grading_output(d)
         self.assertIsInstance(out["overall"]["score"], float)
 
+    def test_allowed_criterion_names_removes_hallucinated_rows(self) -> None:
+        allowed = frozenset({"Conceptual Correctness", "Clarity"})
+        d = {
+            "overall": {"score": 99, "confidence": 0.5, "summary": ""},
+            "criteria": [
+                {
+                    "name": "criterion_1",
+                    "score": 50,
+                    "max_points": 100,
+                    "confidence": 0.0,
+                    "justification": "",
+                    "evidence": "",
+                    "reasoning": "",
+                },
+                {
+                    "name": "Conceptual Correctness",
+                    "score": 3,
+                    "max_points": 4,
+                    "confidence": 0.8,
+                    "justification": "ok",
+                    "evidence": "quote",
+                    "reasoning": "r",
+                },
+            ],
+            "flags": [],
+        }
+        out = validate_grading_output(d, allowed_criterion_names=allowed)
+        names = [c["name"] for c in out["criteria"]]
+        self.assertEqual(names, ["Conceptual Correctness"])
+        self.assertTrue(any("rubric_allowlist" in f for f in out.get("flags", [])))
+
 
 if __name__ == "__main__":
     unittest.main()

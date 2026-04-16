@@ -1,5 +1,8 @@
 """
 Orchestrator: ingestion → chunking → rubric routing → grading → entropy → aggregation → output.
+
+Chunking uses :func:`app.grading.multimodal.rag_embeddings.build_multimodal_grading_chunks`
+(notebook cell-order, optional Ollama QA on PDF-reflowed text, then structured Q/A chunking).
 """
 
 from __future__ import annotations
@@ -9,7 +12,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .aggregator import aggregate_assignment, aggregate_chunk_samples
-from .chunker import default_chunker_build_units
 from .rag_embeddings import build_multimodal_grading_chunks, enrich_chunks_with_rag_embeddings
 from .ingestion import IngestionEnvelope, ingest_raw_submission
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
@@ -77,12 +79,9 @@ class MultimodalGradingPipeline:
         art.append("ingestion", {"envelope": envelope.artifacts.keys()})
 
         app_cfg = self._resolve_app_config()
+        chunks, chunker_mode = build_multimodal_grading_chunks(envelope, app_cfg)
         if app_cfg is not None:
-            chunks, chunker_mode = build_multimodal_grading_chunks(envelope, app_cfg)
             enrich_chunks_with_rag_embeddings(chunks, app_cfg)
-        else:
-            chunks = default_chunker_build_units(envelope)
-            chunker_mode = "heuristic_no_app_config"
         art.append(
             "chunking",
             {
@@ -132,7 +131,13 @@ class MultimodalGradingPipeline:
             strong = bool(self.config.confidence_clustering_strong_pattern)
             for s in raw_samples:
                 parsed, warns = parse_chunk_grade_json(
-                    s.raw_text, rubric_max_points=rubric_mx,
+                    s.raw_text,
+                    rubric_max_points=rubric_mx,
+                    rubric_rows=list(chunk.rubric_rows or []),
+                    invalid_raw_score_policy=str(
+                        getattr(self.config, "raw_score_invalid_policy", "regenerate")
+                        or "regenerate"
+                    ),
                 )
                 parse_ok = parsed is not None
                 pw = list(warns)

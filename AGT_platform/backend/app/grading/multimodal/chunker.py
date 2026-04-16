@@ -1,8 +1,11 @@
 """
 Chunking: build grading chunks (units) from ingestion + optional LMS question map.
 
-Default: one chunk per detected question unit from structured chunking
-(reuses ``build_submission_chunks`` / ``build_grading_units_from_chunks``).
+Default path (non-ipynb): **structured submission chunking** — reflows each
+``=== PDF TEXT ===`` region via :func:`app.grading.submission_chunks.reflow_pdf_sections_in_plaintext`,
+then :func:`app.grading.submission_chunks.build_submission_chunks` (PDF vertical reflow again
+per section, journal-style prompt boundaries when modality hints match) and
+:func:`app.grading.grading_units.build_grading_units_from_chunks` to form Q/A units.
 """
 
 from __future__ import annotations
@@ -10,7 +13,10 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from app.grading.grading_units import build_grading_units_from_chunks
-from app.grading.submission_chunks import build_submission_chunks
+from app.grading.submission_chunks import (
+    build_submission_chunks,
+    reflow_pdf_sections_in_plaintext,
+)
 from .ingestion import IngestionEnvelope
 from .schemas import GradingChunk, Modality, TaskType
 
@@ -52,7 +58,7 @@ def default_chunker_build_units(
     Optional ``max_grading_units`` (positive int) keeps only the first N units (for
     tests or cost limits).
     """
-    plain = (envelope.extracted_plaintext or "").strip()
+    plain = reflow_pdf_sections_in_plaintext((envelope.extracted_plaintext or "").strip())
     if not plain:
         return []
 
@@ -67,7 +73,15 @@ def default_chunker_build_units(
     if st_hint is not None and str(st_hint).strip():
         modality_subtype = str(st_hint).strip()
     elif not modality_subtype:
-        modality_subtype = "notebook"
+        arts = envelope.artifacts or {}
+        has_pdf = bool(isinstance(arts, dict) and arts.get("pdf"))
+        u = plain.upper()
+        if has_pdf or "=== PDF TEXT ===" in u:
+            modality_subtype = "free_response"
+        elif "=== NOTEBOOK" in u:
+            modality_subtype = "notebook"
+        else:
+            modality_subtype = "notebook"
 
     chunks = build_submission_chunks(
         plain,

@@ -15,6 +15,7 @@ import logging
 from typing import Any
 
 from app.grading.aggregation import weighted_overall_confidence, weighted_overall_score
+from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
 
 _log = logging.getLogger(__name__)
 
@@ -226,11 +227,21 @@ def coerce_grading_output_shape(data: Any) -> dict[str, Any]:
     return data
 
 
-def validate_grading_output(data: dict[str, Any]) -> dict[str, Any]:
+def validate_grading_output(
+    data: dict[str, Any],
+    *,
+    allowed_criterion_names: frozenset[str] | None = None,
+) -> dict[str, Any]:
     """
     Validate ``run_grading_pipeline`` / task result shape in-place (normalizes some fields).
 
     Required top-level keys: ``overall`` (dict with ``score``), ``criteria`` (list).
+
+    When ``allowed_criterion_names`` is set (canonical LMS rubric names for this
+    assignment), criteria rows are **filtered** to that set and remapped to canonical
+    spelling; unknown names are removed and ``flags`` gain ``rubric_allowlist:*`` entries.
+    ``overall.score`` is recomputed from the filtered assignment-level criteria when any
+    filtering occurs.
 
     Returns the same ``data`` dict after light normalization (e.g. ``criterion`` → ``name``).
     """
@@ -299,6 +310,11 @@ def validate_grading_output(data: dict[str, Any]) -> dict[str, Any]:
         if c.get("justification") is None:
             c["justification"] = ""
 
+        if c.get("calibrated_credit") is not None:
+            c["calibrated_credit"] = _coerce_float(c["calibrated_credit"])
+        if c.get("raw_rubric_score") is not None:
+            c["raw_rubric_score"] = _coerce_float(c["raw_rubric_score"])
+
         criteria_out.append(c)
     data["criteria"] = criteria_out
 
@@ -326,6 +342,14 @@ def validate_grading_output(data: dict[str, Any]) -> dict[str, Any]:
                     crit.setdefault("evidence", "")
                     crit.setdefault("reasoning", "")
                     crit.setdefault("justification", "")
+                    if crit.get("calibrated_credit") is not None:
+                        crit["calibrated_credit"] = _coerce_float(
+                            crit["calibrated_credit"]
+                        )
+                    if crit.get("raw_rubric_score") is not None:
+                        crit["raw_rubric_score"] = _coerce_float(
+                            crit["raw_rubric_score"]
+                        )
         data["question_grades"] = qg
 
     mod = data.get("_modality")
@@ -356,11 +380,51 @@ def validate_grading_output(data: dict[str, Any]) -> dict[str, Any]:
             )
         data["_modality"] = mod
 
+    if allowed_criterion_names:
+        crit_top, al_top = filter_criteria_dicts_to_allowlist(
+            data.get("criteria") or [],
+            allowed_criterion_names,
+            context="top_level",
+        )
+        data["criteria"] = crit_top
+        fl = data.get("flags")
+        if not isinstance(fl, list):
+            data["flags"] = []
+            fl = data["flags"]
+        for msg in al_top[:80]:
+            tag = f"rubric_allowlist:{msg}"
+            if tag not in fl:
+                fl.append(tag)
+        qg = data.get("question_grades")
+        if isinstance(qg, list):
+            for row in qg:
+                if not isinstance(row, dict):
+                    continue
+                cid = str(row.get("chunk_id") or "question_grade")
+                qc = row.get("criteria") or []
+                qf, al_q = filter_criteria_dicts_to_allowlist(
+                    [c for c in qc if isinstance(c, dict)],
+                    allowed_criterion_names,
+                    context=cid,
+                )
+                row["criteria"] = qf
+                for msg in al_q[:40]:
+                    t2 = f"rubric_allowlist:{msg}"
+                    if t2 not in fl:
+                        fl.append(t2)
+        if crit_top:
+            data["overall"]["score"] = weighted_overall_score(crit_top)
+            data["overall"]["confidence"] = _coerce_confidence(
+                weighted_overall_confidence(crit_top)
+            )
+
     return data
 
 
 def validate_grading_output_lenient(
     data: dict[str, Any],
+    *,
+    allowed_criterion_names: frozenset[str] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Like :func:`validate_grading_output` but returns ``(data, issues)`` for soft checks."""
     issues: list[str] = []
@@ -368,4 +432,6 @@ def validate_grading_output_lenient(
         issues.append("criteria is not a list")
     elif len(data.get("criteria") or []) == 0:
         issues.append("criteria is empty")
-    return validate_grading_output(data), issues
+    return validate_grading_output(
+        data, allowed_criterion_names=allowed_criterion_names
+    ), issues

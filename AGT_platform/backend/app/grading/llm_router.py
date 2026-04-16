@@ -118,8 +118,21 @@ class OllamaClient:
             json=body,
             timeout=self._timeout_sec,
         )
+        if r.status_code >= 400:
+            snippet = (getattr(r, "text", None) or "")[:1200].strip()
+            _log.warning(
+                "Ollama /api/chat HTTP %s for model=%r: %s",
+                r.status_code,
+                self.model,
+                snippet or "(empty body)",
+            )
         r.raise_for_status()
-        content = r.json()["message"]["content"]
+        try:
+            payload = r.json()
+        except json.JSONDecodeError:
+            _log.warning("Ollama returned non-JSON body for model=%r", self.model)
+            raise
+        content = (payload.get("message") or {}).get("content") or ""
         return parse_llm_json_content(content)
 
 

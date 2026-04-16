@@ -64,6 +64,10 @@ class MultimodalGradingConfig:
     confidence_ai_caution_min: float = 0.50
     # If True, high criterion disagreement can bump AUTO_ACCEPTED → CAUTION.
     confidence_caution_on_high_criterion_disagreement: bool = True
+    # ``regenerate``: invalid raw rubric increments fail the whole chunk parse.
+    # ``nearest_half`` / ``ceil_half``: snap **up** to the next valid half-step on
+    # ``[0, max_points]``, capped at ``max_points`` (ceiling on the 0.5 grid).
+    raw_score_invalid_policy: str = "regenerate"
 
 
 @dataclass
@@ -105,14 +109,23 @@ class GradingChunk:
 
 @dataclass
 class CriterionScore:
+    """``score`` is the raw rubric level (half-step grid); ``calibrated_credit`` is g(r) in [0,1]."""
+
     name: str
     score: float
     max_points: float
     weight: float = 1.0
+    calibrated_credit: float = 0.0
 
 
 @dataclass
 class ParsedChunkGrade:
+    """
+    ``total_score`` is the sum of per-criterion raw rubric scores (audit).
+    ``normalized_score`` is the weighted calibrated question score in ``[0, 1]``.
+    ``calibrated_question_score_0_100`` is ``100 * normalized_score``.
+    """
+
     rubric_type: RubricType | str
     criterion_scores: list[CriterionScore]
     criterion_justifications: list[str]
@@ -123,6 +136,7 @@ class ParsedChunkGrade:
     criterion_evidence: list[str] = field(default_factory=list)
     criterion_reasoning: list[str] = field(default_factory=list)
     parse_warnings: list[str] = field(default_factory=list)
+    calibrated_question_score_0_100: float = 0.0
 
 
 @dataclass

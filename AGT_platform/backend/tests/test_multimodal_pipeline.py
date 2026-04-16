@@ -1,6 +1,11 @@
 """
 Tests for the multimodal grading pipeline.
 
+When integration logs show ``grading_llm_sample_failed`` or JSON/HTTP errors, those are
+**LLM inference / Ollama** failures during per-chunk grading, not notebook or RAG chunking.
+Chunking is recorded under ``pipeline_audit`` → ``chunking``; failures there would indicate
+a chunking issue.
+
 - **Unit tests** (routing, entropy, mock pipeline): fast, no LLM required.
 - **Integration test** (``LocalAssignmentGradingTests``): grades every file in
   ``assignments_to_grade/`` using the real rubric from ``rubric/default.json``
@@ -23,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import unittest
 from collections import defaultdict
 from pathlib import Path
@@ -53,6 +59,7 @@ from app.grading.multimodal.schemas import (
 from app.grading.multimodal.model_runner import MockChunkModelRunner
 from app.grading.multimodal.rubric_router import route_rubric
 from app.grading.multimodal.entropy import semantic_entropy_from_cluster_counts
+from app.grading.multimodal.parser import parse_chunk_grade_json
 from app.grading.output_schema import validate_grading_output
 from app.grading.rag_embeddings import (
     compute_submission_embedding,
@@ -215,6 +222,7 @@ def _ollama_reachable(cfg: Config) -> bool:
 def _ollama_chat_smoke(cfg: Config) -> tuple[bool, str]:
     base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
     model = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
+    timeout = int(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 120))
     try:
         r = requests.post(
             f"{base}/api/chat",
@@ -222,8 +230,9 @@ def _ollama_chat_smoke(cfg: Config) -> tuple[bool, str]:
                 "model": model,
                 "messages": [{"role": "user", "content": 'Reply: {"ok":true}'}],
                 "stream": False,
+                "keep_alive": getattr(cfg, "OLLAMA_KEEP_ALIVE", "5m"),
             },
-            timeout=60,
+            timeout=timeout,
         )
         if r.status_code != 200:
             return False, f"HTTP {r.status_code} for {model!r}"
@@ -232,7 +241,7 @@ def _ollama_chat_smoke(cfg: Config) -> tuple[bool, str]:
             return False, f"Empty content from {model!r}"
         return True, ""
     except requests.exceptions.ReadTimeout:
-        return False, f"Timeout for {model!r}"
+        return False, f"Timeout ({timeout}s) for {model!r}"
     except requests.exceptions.RequestException as e:
         return False, str(e)
 
@@ -240,21 +249,29 @@ def _ollama_chat_smoke(cfg: Config) -> tuple[bool, str]:
 def _configure_for_integration_test(cfg: Config) -> None:
     """Override Config in-place for the integration test.
 
-    **Chunking**: llama3.2:3b splits each assignment into Q/A grading units
-    via Ollama QA segmentation (``MULTIMODAL_OLLAMA_QA_SEGMENT=on``).
+    **Chunking** (priority order):
+      1. **Notebook cell-order** — ipynb files are parsed directly by
+         ``build_notebook_qa_chunks``, preserving cell order for accurate
+         question/answer pairing.  No LLM required.
+      2. **Ollama QA segmentation** — when ``MULTIMODAL_OLLAMA_QA_SEGMENT=on``, non-notebook
+         files use llama3.2:3b for LLM-based Q/A segmentation. Uses the same HTTP read timeout
+         as ``OLLAMA_CHAT_TIMEOUT_SEC`` (e.g. 600s here), not a separate 180s cap, so cold
+         model loads can finish.
+      3. **Structured heuristic** — deterministic PDF reflow + journal-style boundaries when
+         the above is off or fails/timeouts.
 
     **Grading**: three Ollama models, no OpenAI:
       1. llama3.2:3b  (primary)
       2. phi3.5:3.8b  (Phi-3.5-Mini-3.8B)
       3. deepseek-r1:1.5b (DeepSeek-R1 1.5B)
 
-    3 samples per model at temperature 0.4 → 9 samples per chunk.
+    3 samples per model at temperature 0.3 → 9 samples per chunk.
     Timeout raised to 600s for cold model loads on laptops.
 
     All overrides are **unconditional** so that stale values from parent
     ``.env`` files or host env vars never leak through.
     """
-    # --- Chunking: llama3.2:3b only ---
+    # --- Chunking: Ollama QA fallback for non-notebook files ---
     os.environ["MULTIMODAL_OLLAMA_QA_SEGMENT"] = "on"
     os.environ["MULTIMODAL_QA_SEGMENT_MODEL"] = "llama3.2:3b"
 
@@ -282,7 +299,7 @@ def _configure_for_integration_test(cfg: Config) -> None:
     cfg.GRADING_SAMPLES_PER_MODEL = int(
         os.getenv("MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES", "3") or 3
     )
-    cfg.GRADING_SAMPLE_TEMPERATURE = 0.4
+    cfg.GRADING_SAMPLE_TEMPERATURE = 0.3
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +404,147 @@ class MultimodalPipelineRunTests(unittest.TestCase):
             aux = ch.auxiliary or {}
             self.assertIn("criterion_justifications", aux)
             self.assertIn("confidence_note", aux)
+
+
+# ---------------------------------------------------------------------------
+# Chunking accuracy tests (no LLM — verifies notebook cell-order chunker)
+# ---------------------------------------------------------------------------
+
+@unittest.skipUnless(
+    ASSIGNMENTS_DIR.is_dir(),
+    "Requires assignments_to_grade/ at the repository root.",
+)
+class NotebookChunkingAccuracyTests(unittest.TestCase):
+    """Verify that the notebook-aware chunker accurately splits ipynb
+    assignments into question/answer pairs by preserving cell order.
+
+    No LLM calls — tests the deterministic regex-based chunker only.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.groups = _assignment_groups()
+        if not cls.groups:
+            raise unittest.SkipTest(f"No files in {ASSIGNMENTS_DIR}.")
+
+    def _get_ipynb_paths(self) -> list[tuple[str, Path]]:
+        out: list[tuple[str, Path]] = []
+        for stem, paths in self.groups.items():
+            for p in paths:
+                if p.suffix.lower() == ".ipynb":
+                    out.append((stem, p))
+        return out
+
+    def test_notebook_chunker_produces_chunks(self) -> None:
+        """Each ipynb must produce at least one chunk with non-empty text."""
+        from app.grading.multimodal.notebook_chunker import build_notebook_qa_chunks
+
+        ipynb_items = self._get_ipynb_paths()
+        if not ipynb_items:
+            self.skipTest("No .ipynb files in assignments_to_grade/.")
+
+        for stem, path in ipynb_items:
+            with self.subTest(assignment=stem):
+                raw = path.read_bytes()
+                chunks = build_notebook_qa_chunks(
+                    raw, assignment_id=stem, student_id="chunk_test",
+                )
+                self.assertGreater(
+                    len(chunks), 0,
+                    f"Notebook chunker produced 0 chunks for {stem!r}",
+                )
+                for ch in chunks:
+                    self.assertTrue(
+                        ch.extracted_text.strip(),
+                        f"Empty extracted_text in chunk {ch.chunk_id!r}",
+                    )
+
+    def test_every_chunk_has_student_content(self) -> None:
+        """Each chunk should contain student work, not just a question prompt."""
+        from app.grading.multimodal.notebook_chunker import build_notebook_qa_chunks
+
+        ipynb_items = self._get_ipynb_paths()
+        if not ipynb_items:
+            self.skipTest("No .ipynb files in assignments_to_grade/.")
+
+        for stem, path in ipynb_items:
+            with self.subTest(assignment=stem):
+                raw = path.read_bytes()
+                chunks = build_notebook_qa_chunks(
+                    raw, assignment_id=stem, student_id="chunk_test",
+                )
+                for ch in chunks:
+                    ev = ch.evidence or {}
+                    resp_preview = ev.get("response_preview", "")
+                    self.assertTrue(
+                        resp_preview.strip(),
+                        f"[{stem}] Chunk {ch.question_id!r} has a question "
+                        f"but no student response content.",
+                    )
+
+    def test_structured_notebook_question_ids(self) -> None:
+        """Notebooks with ### Question X.Y headers produce numeric question IDs."""
+        from app.grading.multimodal.notebook_chunker import build_notebook_qa_chunks
+
+        for stem, path in self._get_ipynb_paths():
+            with self.subTest(assignment=stem):
+                raw = path.read_bytes()
+                nb = json.loads(raw)
+                md_sources = [
+                    "".join(c.get("source", []))
+                    if isinstance(c.get("source"), list)
+                    else str(c.get("source", ""))
+                    for c in nb.get("cells", [])
+                    if c.get("cell_type") == "markdown"
+                ]
+                has_question_headers = any(
+                    re.search(
+                        r"#{1,4}\s*(?:Question|Problem)\s+\d", s, re.IGNORECASE
+                    )
+                    for s in md_sources
+                )
+                if not has_question_headers:
+                    continue
+
+                chunks = build_notebook_qa_chunks(
+                    raw, assignment_id=stem, student_id="chunk_test",
+                )
+                numeric_ids = [
+                    ch.question_id
+                    for ch in chunks
+                    if re.match(r"\d+\.", ch.question_id)
+                ]
+                self.assertGreater(
+                    len(numeric_ids), 0,
+                    f"[{stem}] Has ### Question headers but chunker "
+                    f"produced no numeric question IDs. Got: "
+                    f"{[ch.question_id for ch in chunks]}",
+                )
+
+    def test_pipeline_uses_notebook_chunker_for_ipynb(self) -> None:
+        """When ipynb bytes are in the envelope, the pipeline uses notebook_cell_order."""
+        from app.grading.multimodal.rag_embeddings import build_multimodal_grading_chunks
+
+        ipynb_items = self._get_ipynb_paths()
+        if not ipynb_items:
+            self.skipTest("No .ipynb files in assignments_to_grade/.")
+
+        stem, path = ipynb_items[0]
+        raw = path.read_bytes()
+        envelope = ingest_raw_submission(
+            assignment_id=stem, student_id="chunk_test",
+            artifacts={"ipynb": raw},
+            extracted_plaintext="(unused for notebook chunker)",
+            modality_hints={"modality_subtype": "notebook"},
+        )
+        cfg = Config()
+        chunks, mode = build_multimodal_grading_chunks(envelope, cfg)
+        self.assertEqual(mode, "notebook_cell_order")
+        self.assertGreater(len(chunks), 0)
+        _log.warning(
+            "Pipeline notebook chunker: %d chunks for %s (mode=%s)",
+            len(chunks), stem, mode,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +691,7 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                 )
                 envelope = ingest_raw_submission(
                     assignment_id=stem, student_id="local_test",
-                    artifacts={k: "<local_fixture>" for k in sorted(artifacts.keys())},
+                    artifacts=artifacts,
                     extracted_plaintext=plain,
                     modality_hints={
                         "modality_subtype": str(modality_profile.get("modality_subtype") or ""),
@@ -548,9 +706,29 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                     result, rubric=self.rubric_flat,
                     modality_profile=modality_profile,
                 )
-                validated = validate_grading_output(grading_dict)
+                flat_allowed = frozenset(
+                    str(r["name"]).strip()
+                    for r in self.rubric_flat
+                    if isinstance(r, dict) and str(r.get("name") or "").strip()
+                )
+                validated = validate_grading_output(
+                    grading_dict, allowed_criterion_names=flat_allowed
+                )
                 self.assertIn("score", validated["overall"])
                 self.assertIn("question_grades", validated)
+                for row in validated.get("criteria") or []:
+                    if isinstance(row, dict) and row.get("name"):
+                        self.assertIn(
+                            row["name"], flat_allowed,
+                            f"[{stem}] assignment criteria must be rubric-backed: {row!r}",
+                        )
+                for qg in validated.get("question_grades") or []:
+                    for c in (qg.get("criteria") or []) if isinstance(qg, dict) else []:
+                        if isinstance(c, dict) and c.get("name"):
+                            self.assertIn(
+                                c["name"], flat_allowed,
+                                f"[{stem}] chunk criteria must be rubric-backed: {c!r}",
+                            )
 
                 # -- 5b. Always write output before assertions --
                 out_path = OUTPUT_DIR / f"{stem}_grade_output.json"
@@ -613,6 +791,52 @@ class LocalAssignmentGradingTests(unittest.TestCase):
             len(graded_stems), len(self.groups),
             f"Graded {len(graded_stems)} of {len(self.groups)} assignments.",
         )
+
+
+class ParseChunkGradeRubricAlignmentTests(unittest.TestCase):
+    """Chunk JSON is aligned to routed rubric rows; placeholder keys are dropped."""
+
+    def test_drop_placeholder_criterion_names(self) -> None:
+        rubric_rows = [
+            {"name": "Conceptual Correctness", "max_points": 4},
+            {"name": "Clarity", "max_points": 1},
+        ]
+        raw = json.dumps(
+            {
+                "rubric_type": "free_response",
+                "criterion_scores": [
+                    {
+                        "name": "criterion_1",
+                        "score": 50,
+                        "max_points": 100,
+                        "evidence": "",
+                        "reasoning": "",
+                        "justification": "",
+                    },
+                    {
+                        "name": "Conceptual Correctness",
+                        "score": 3.5,
+                        "max_points": 4,
+                        "evidence": "e1",
+                        "reasoning": "r1",
+                        "justification": "j1",
+                    },
+                ],
+                "criterion_justifications": ["", ""],
+                "total_score": 3.5,
+                "normalized_score": 0.7,
+                "confidence_note": "",
+                "review_flag": False,
+            }
+        )
+        parsed, warns = parse_chunk_grade_json(raw, rubric_rows=rubric_rows)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        names = [c.name for c in parsed.criterion_scores]
+        self.assertEqual(names, ["Conceptual Correctness", "Clarity"])
+        self.assertEqual(parsed.criterion_scores[0].score, 3.5)
+        self.assertAlmostEqual(parsed.criterion_scores[0].calibrated_credit, 0.90, places=5)
+        self.assertTrue(any("dropped_unknown_criterion" in w for w in warns))
 
 
 if __name__ == "__main__":

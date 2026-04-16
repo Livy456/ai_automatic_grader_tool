@@ -2,6 +2,63 @@ import io, json, subprocess, tempfile, os
 import nbformat
 from pypdf import PdfReader
 
+
+def normalize_verticalized_pdf_text(text: str) -> str:
+    """
+    Reflow PDF text where extractors emit **one token per line** (common with
+    pypdf layout / some Google Docs exports).
+
+    Joins tokens into readable lines and inserts paragraph breaks on sentence
+    boundaries so downstream line-based chunkers can pair prompts with answers.
+    """
+    stripped = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if len(stripped) < 12:
+        return text
+    avg_len = sum(len(s) for s in stripped) / len(stripped)
+    # Normal prose PDFs: most lines are full-width sentences.
+    if avg_len > 52:
+        return text
+
+    words: list[str] = []
+    for ln in stripped:
+        words.extend(ln.split())
+    if len(words) < 20:
+        return text
+
+    # Continuations of the same instructor prompt after an internal "?" (journal rubrics).
+    _Q_CONTINUATION = frozenset(
+        {"if", "which", "or", "and", "then", "else", "also", "what", "how", "why", "when", "where"}
+    )
+
+    out_paras: list[str] = []
+    cur: list[str] = []
+    for i, w in enumerate(words):
+        wl = w.lower().rstrip(".,;:!?")
+        if (
+            wl == "homework"
+            and i + 1 < len(words)
+            and words[i + 1].split(".", 1)[0].strip().isdigit()
+            and cur
+            and len(cur) >= 10
+        ):
+            out_paras.append(" ".join(cur))
+            cur = []
+        cur.append(w)
+        if w.endswith("?") and len(cur) >= 6:
+            nxt = words[i + 1] if i + 1 < len(words) else ""
+            first = (nxt.split("-", 1)[0].strip("(\"'").lower() if nxt else "")
+            if first in _Q_CONTINUATION:
+                continue
+            out_paras.append(" ".join(cur))
+            cur = []
+        elif w.endswith(".") and len(cur) >= 14:
+            out_paras.append(" ".join(cur))
+            cur = []
+    if cur:
+        out_paras.append(" ".join(cur))
+    return "\n\n".join(out_paras)
+
+
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     """
     Extract text from PDF bytes. Tries default extraction, then layout mode when output is tiny
@@ -19,7 +76,8 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
             if isinstance(alt, str) and len(alt.strip()) > len(text):
                 text = alt.strip()
         parts.append(text)
-    return "\n\n".join(p for p in parts if p).strip()
+    joined = "\n\n".join(p for p in parts if p).strip()
+    return normalize_verticalized_pdf_text(joined)
 
 def extract_from_ipynb(ipynb_bytes: bytes) -> dict:
     nb = nbformat.reads(ipynb_bytes.decode("utf-8"), as_version=4)

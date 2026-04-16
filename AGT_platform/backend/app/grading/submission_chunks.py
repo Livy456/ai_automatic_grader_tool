@@ -10,27 +10,33 @@ Chunking strategy (high level)
    notebook *code* can be labeled ``role: \"code\"`` and prose/markdown as ``response``
    unless a line looks like source (see heuristics below).
 
-2. **Question / answer pairs (prose sections)** — Within each prose block (PDF text,
-   markdown export, plain txt, notebook markdown), we look for *question-like* single
-   lines: ``Part 1.``, ``Question 2``, ``Q3:``, numbered items, ``## Heading``, etc.
-   (same patterns as before, one line per header).
+2. **PDF vertical reflow (new chunking method)** — For ``=== PDF TEXT ===`` bodies,
+   :func:`app.grading.tools.normalize_verticalized_pdf_text` runs **again** here so
+   chunking stays correct even if plaintext bypassed :func:`~app.grading.tools.extract_text_from_pdf`.
+   Reflow joins one-word-per-line extractor output, breaks paragraphs on ``?`` / ``.`` /
+   ``Homework N`` boundaries, and keeps internal multi-part prompts (``…? If … Which …?``)
+   together using continuation-token rules (see ``new_chunking_method.md``).
 
-   * For each header line we emit one chunk with ``role: \"question\"`` whose ``text`` is
-     exactly that prompt line (trimmed).
-   * The material **after** that line until the next header is the student work; we emit
-     one or more chunks with ``role: \"response\"`` or ``role: \"code\"`` depending on
-     content (and section), packed to ``max_chunk_chars`` by paragraph.
+3. **Question / answer pairs (prose sections)** — Within each prose block we find
+   *question-like* **single lines**:
 
-3. **Leading body before the first header** — Treated as unattached submission text:
-   ``role: \"response\"`` (or ``code`` if it clearly looks like code) with
+   * **Structured headers** — ``Part 1.``, ``Question 2``, ``Q3:``, numbered items,
+     ``## Heading`` (regex ``_CHUNK_HEADER``; ``Question`` must be numbered or ``Question:``,
+     so the English word *questions* alone is not a header).
+   * **Journal / free-response PDFs** — When ``modality_subtype`` suggests a journal-style
+     PDF (substring ``journal``, ``free_response``, ``reflection``, etc.), lines that look
+     like full-sentence instructor prompts (start with ``What`` / ``Did`` / …, end with ``?``)
+     are extra boundaries (regex ``_JOURNAL_INSTRUCTOR_PROMPT``).
+
+   For each boundary line we emit ``role: \"question\"``; material until the next boundary
+   becomes ``role: \"response\"`` (or ``code``) with the same ``pair_id``.
+
+4. **Leading body before the first header** — ``role: \"response\"`` (or ``code``) with
    ``pair_id: null``.
 
-4. **No headers found** — If there are no question-like lines, the whole section becomes
-   ``response`` and/or ``code`` chunks only (typical for pasted essays or single-cell
-   notebooks).
+5. **No headers found** — The whole section becomes ``response`` / ``code`` only.
 
-5. **Metadata** — Every chunk repeats ``assignment_title``, ``modality_subtype``,
-   ``chunk_index``, and when applicable ``pair_id`` linking a question to its answer chunk(s).
+6. **Metadata** — ``assignment_title``, ``modality_subtype``, ``chunk_index``, ``pair_id``.
 """
 
 from __future__ import annotations
@@ -40,20 +46,102 @@ import re
 from pathlib import Path
 from typing import Any, Sequence
 
+from app.grading.tools import normalize_verticalized_pdf_text
+
 # Banner lines from submission_text_from_artifacts: "=== LABEL (key) ===" or "=== LABEL ==="
 _SECTION_BANNER = re.compile(
     r"(?m)^(===\s*.+?\s*===)\s*\n",
 )
 
+# One ``=== PDF TEXT ===`` block (body until the next ``===`` banner or EOF).
+_PDF_TEXT_SECTION = re.compile(
+    r"(?mis)^(===\s*PDF\s+TEXT\s*===)\s*\r?\n([\s\S]*?)(?=^[ \t]*===\s*.+?\s*===\s*$|\Z)",
+)
+
+
+def reflow_pdf_sections_in_plaintext(text: str) -> str:
+    """
+    Apply :func:`app.grading.tools.normalize_verticalized_pdf_text` to every
+    ``=== PDF TEXT ===`` region. Used by the multimodal grading pipeline so PDF
+    submissions are reflowed before Ollama QA segmentation and before structured
+    chunking (which also reflows per section as a second pass).
+    """
+
+    raw = text or ""
+    if not raw.strip() or "PDF TEXT" not in raw.upper():
+        return text or ""
+
+    def _repl(m: re.Match[str]) -> str:
+        banner, body = m.group(1), (m.group(2) or "").strip()
+        if not body:
+            return m.group(0)
+        return f"{banner}\n{normalize_verticalized_pdf_text(body)}"
+
+    return _PDF_TEXT_SECTION.sub(_repl, raw)
+
 # Question / prompt lines (single line only; horizontal whitespace only after header key).
+# NOTE: Avoid matching the common English word "questions" as "Question" + "s"
+# (the older pattern did, which destroyed PDF journal Q/A pairing).
 _CHUNK_HEADER = re.compile(
     r"(?m)^(?:"
-    r"[ \t]*(?:Part|Question|Q)[ \t]*[\dA-Z]+[\.\):]?[ \t]*[^\n]*|"
+    r"[ \t]*Part[ \t]+[\dA-Z][^\n]*|"
+    r"[ \t]*Question(?:[ \t]+\d[\w.\-]*[^\n]*|\s*:[^\n]*)|"
+    r"[ \t]*Q[ \t]*\d+[\w.\-]*[\.\):]?[ \t]*[^\n]*|"
     r"[ \t]*\d+[\.\)][ \t]+\S[^\n]*|"
     r"[ \t]*#{1,3}[ \t]+\S[^\n]*"
     r")\s*$",
     re.IGNORECASE,
 )
+
+# Journal / free-response PDFs: full-sentence instructor prompts often end with "?"
+# without "Question 1" labels (after verticalized text has been reflowed).
+_JOURNAL_INSTRUCTOR_PROMPT = re.compile(
+    r"(?m)^"
+    r"(?=(?:What|Which|Did|How|Why|Explain|List|Describe|Are|Is|If|Would|Could|"
+    r"Should|Have|Was|Were|For|In|Can|May|Must|Shall|Who|When|Where)\b)"
+    r"(?!I\b|We\b|My\b|It\b|The\b|Yes\b|No\b|This\b|That\b|Here\b|There\b)"
+    r".{15,}\?\s*$",
+    re.IGNORECASE,
+)
+
+# modality_subtype hints from resolve_modality_profile / LMS (see new_chunking_method.md)
+_JOURNALISH_SUBSTRINGS = (
+    "journal",
+    "free_response",
+    "reflection",
+    "essay",
+    "written",
+    "short_answer",
+)
+
+
+def _pdf_uses_journal_style_prompts(modality_subtype: str) -> bool:
+    st = (modality_subtype or "").lower()
+    return any(s in st for s in _JOURNALISH_SUBSTRINGS)
+
+
+def _prose_boundary_matches(
+    body: str,
+    *,
+    section_kind: str,
+    modality_subtype: str,
+) -> list[re.Match[str]]:
+    """Collect non-overlapping header matches (structured + journal-style)."""
+    spans: list[tuple[int, int, re.Match[str]]] = []
+    for m in _CHUNK_HEADER.finditer(body):
+        spans.append((m.start(), m.end(), m))
+    if section_kind == "pdf" and _pdf_uses_journal_style_prompts(modality_subtype):
+        for m in _JOURNAL_INSTRUCTOR_PROMPT.finditer(body):
+            spans.append((m.start(), m.end(), m))
+    spans.sort(key=lambda x: x[0])
+    out: list[re.Match[str]] = []
+    prev_end = -1
+    for start, end, m in spans:
+        if start < prev_end:
+            continue
+        out.append(m)
+        prev_end = end
+    return out
 
 # Lightweight "is this Python/code?" heuristic for classifying answer bodies.
 _CODE_LINE_PATTERNS = (
@@ -220,7 +308,13 @@ def _chunks_from_prose_section(
     idx = chunk_index_start
     pair_id = pair_id_start
 
-    boundaries = list(_CHUNK_HEADER.finditer(body))
+    body = (body or "").strip()
+    if section_kind == "pdf":
+        body = normalize_verticalized_pdf_text(body)
+
+    boundaries = _prose_boundary_matches(
+        body, section_kind=section_kind, modality_subtype=modality_subtype
+    )
     if not boundaries:
         ans_role = _answer_role_for_body(
             body, section_kind=section_kind, modality_subtype=modality_subtype

@@ -9,8 +9,32 @@ from typing import Any
 
 from app.grading.aggregation import weighted_overall_confidence, weighted_overall_score
 from app.grading.consistency_rules import run_rule_checks
+from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
 
 from .schemas import AssignmentGradeResult, ChunkGradeOutcome
+
+
+def _weighted_calibrated_overall_pct(merged: list[dict[str, Any]]) -> float | None:
+    """``100 * sum(w*g) / sum(w)`` when rows expose ``calibrated_credit``; else None."""
+    wt = 0.0
+    acc = 0.0
+    n = 0
+    for r in merged:
+        if not isinstance(r, dict):
+            continue
+        if "calibrated_credit" not in r:
+            return None
+        try:
+            w = float(r.get("weight") or r.get("max_points") or 0)
+            g = float(r["calibrated_credit"])
+        except (TypeError, ValueError):
+            return None
+        wt += w
+        acc += w * g
+        n += 1
+    if n == 0 or wt <= 0:
+        return None
+    return round(100.0 * acc / wt, 2)
 
 
 def _merge_criteria_max_by_name(
@@ -31,10 +55,22 @@ def _merge_criteria_max_by_name(
             if not name:
                 continue
             try:
+                cc = float(c.get("calibrated_credit", -1.0))
+            except (TypeError, ValueError):
+                cc = -1.0
+            try:
                 sc = float(c.get("score", 0))
             except (TypeError, ValueError):
                 sc = 0.0
-            if name not in best or sc > float(best[name].get("score", 0)):
+            cur_cc = -1.0
+            if name in best:
+                try:
+                    cur_cc = float(best[name].get("calibrated_credit", -1.0))
+                except (TypeError, ValueError):
+                    cur_cc = -1.0
+            if name not in best or cc > cur_cc or (
+                abs(cc - cur_cc) < 1e-9 and sc > float(best[name].get("score", 0))
+            ):
                 best[name] = dict(c)
             bf = backfill.setdefault(name, {})
             for field in ("evidence", "justification", "reasoning"):
@@ -107,6 +143,14 @@ def _chunk_to_question_grade(
     ev_map: dict[str, str] = aux.get("criterion_evidence") or {}
     reason_map: dict[str, str] = aux.get("criterion_reasoning") or {}
     conf_note: str = aux.get("confidence_note") or ""
+    raw_map: dict[str, float] = {}
+    raw_aux = aux.get("criterion_raw_scores") or {}
+    if isinstance(raw_aux, dict):
+        for k, v in raw_aux.items():
+            try:
+                raw_map[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
 
     se_confidence = round(float(chunk.ai_confidence), 4)
 
@@ -114,8 +158,11 @@ def _chunk_to_question_grade(
     for name, ratio in (chunk.criterion_consensus or {}).items():
         mp = float(max_by_name.get(name) or 100.0)
         ratio_f = max(0.0, min(1.0, float(ratio)))
+        raw_consensus = float(raw_map.get(name, 0.0))
         row: dict[str, Any] = {
             "name": name,
+            "raw_rubric_score": raw_consensus,
+            "calibrated_credit": ratio_f,
             "score": round(ratio_f * mp, 4),
             "max_points": mp,
             "confidence": se_confidence,
@@ -137,7 +184,7 @@ def _chunk_to_question_grade(
         "chunk_id": chunk.chunk_id,
         "criteria": criteria_rows,
         "overall": {
-            "score": float(chunk.normalized_score_estimate),
+            "score": round(float(chunk.normalized_score_estimate) * 100.0, 4),
             "confidence": se_confidence,
             "summary": evidence_summary,
             "semantic_entropy": round(float(chunk.semantic_entropy_nats), 4),
@@ -185,11 +232,33 @@ def multimodal_assignment_to_grading_dict(
     merged = _merge_criteria_max_by_name(question_grades)
     _apply_rubric_weights_to_criteria(merged, rubric_items)
 
+    allowed = frozenset(r["name"] for r in rubric_items)
+    merged, allow_issues = filter_criteria_dicts_to_allowlist(
+        merged, allowed, context="assignment_merged"
+    )
+    all_consistency_issues.extend(allow_issues)
+
+    for qg in question_grades:
+        cid = str(qg.get("chunk_id") or "chunk")
+        crits = qg.get("criteria") or []
+        filtered, q_issues = filter_criteria_dicts_to_allowlist(
+            [c for c in crits if isinstance(c, dict)],
+            allowed,
+            context=cid,
+        )
+        qg["criteria"] = filtered
+        all_consistency_issues.extend(q_issues)
+
     # --- Consistency checks on merged assignment-level criteria ---
     assignment_issues = run_rule_checks(merged)
     all_consistency_issues.extend(assignment_issues)
 
-    overall_score = weighted_overall_score(merged)
+    calib_overall = _weighted_calibrated_overall_pct(merged)
+    overall_score = (
+        calib_overall
+        if calib_overall is not None
+        else weighted_overall_score(merged)
+    )
     wconf = weighted_overall_confidence(merged)
 
     entropies = [float(c.semantic_entropy_nats) for c in result.chunk_results]
