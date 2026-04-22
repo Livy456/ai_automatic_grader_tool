@@ -285,6 +285,17 @@ class Config:
     MULTIMODAL_OPENAI_TRIO_INPUT_MAX_CHARS = _env_int(
         "MULTIMODAL_OPENAI_TRIO_INPUT_MAX_CHARS", default=120_000
     )
+    # When the submission plain text exceeds this many characters, trio extraction uses
+    # overlapping windows (each call still receives up to ANSWER_KEY_MAX_CHARS of the key).
+    MULTIMODAL_OPENAI_TRIO_WINDOW_CHARS = _env_int(
+        "MULTIMODAL_OPENAI_TRIO_WINDOW_CHARS", default=48_000
+    )
+    MULTIMODAL_OPENAI_TRIO_WINDOW_OVERLAP_CHARS = _env_int(
+        "MULTIMODAL_OPENAI_TRIO_WINDOW_OVERLAP_CHARS", default=4_096
+    )
+    MULTIMODAL_OPENAI_TRIO_ANSWER_KEY_MAX_CHARS = _env_int(
+        "MULTIMODAL_OPENAI_TRIO_ANSWER_KEY_MAX_CHARS", default=32_000
+    )
     # Defaults align with gpt-5.4-nano + text-embedding-3-small list pricing; override if your SKU differs.
     OPENAI_TRIO_RAG_CHAT_INPUT_USD_PER_MTOK = _env_float(
         "OPENAI_TRIO_RAG_CHAT_INPUT_USD_PER_MTOK", default=0.20

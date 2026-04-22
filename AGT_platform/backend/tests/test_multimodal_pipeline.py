@@ -1855,6 +1855,58 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         self.assertIn("per_chunk_avg_cost_usd", audit)
         inst.chat_json_with_usage.assert_called_once()
 
+    def test_openai_trio_rag_frontload_multiple_windows_merge_dupes(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from app.grading.multimodal.ingestion import ingest_raw_submission
+        from app.grading.multimodal.openai_trio_rag_frontload import (
+            run_openai_trio_rag_frontload,
+        )
+
+        cfg = Config()
+        cfg.OPENAI_API_KEY = "sk-test"
+        cfg.OPENAI_TRIO_RAG_CHAT_MODEL = "gpt-test"
+        cfg.OPENAI_TRIO_RAG_EMBEDDING_MODEL = "text-embedding-3-small"
+        cfg.MULTIMODAL_OPENAI_TRIO_WINDOW_CHARS = 12
+        cfg.MULTIMODAL_OPENAI_TRIO_WINDOW_OVERLAP_CHARS = 2
+
+        inst = MagicMock()
+        one_unit = {
+            "question_id": "w",
+            "question": "q",
+            "student_response": "s",
+            "answer_key_segment": "a",
+            "extracted_text": "q\ns",
+        }
+        inst.chat_json_with_usage.return_value = (
+            {"units": [one_unit]},
+            {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+        def fake_embed(texts, **kwargs):
+            return [[0.1, 0.2] for _ in range(len(texts))], 10
+
+        long_text = "x" * 30
+        with patch(
+            "app.grading.multimodal.openai_trio_rag_frontload.OpenAIJsonClient",
+            return_value=inst,
+        ), patch(
+            "app.grading.multimodal.openai_trio_rag_frontload._openai_embed_batch",
+            side_effect=fake_embed,
+        ):
+            env = ingest_raw_submission(
+                assignment_id="a1",
+                student_id="s1",
+                artifacts={},
+                extracted_plaintext=long_text,
+            )
+            chunks, audit = run_openai_trio_rag_frontload(env, cfg, "## key")
+
+        self.assertTrue(audit.get("ok"))
+        self.assertGreater(int(audit.get("trio_window_count") or 0), 1)
+        self.assertGreater(inst.chat_json_with_usage.call_count, 1)
+        self.assertEqual(len(chunks), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,7 +20,8 @@ Aligns with :mod:`app.grading.rag_embeddings` — per-chunk vectors from
    disable with ``MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD=off``),
    :func:`app.grading.multimodal.openai_trio_rag_frontload.run_openai_trio_rag_frontload`
    replaces steps 3–4 for
-   that run (single OpenAI chat + OpenAI Embeddings API). Otherwise, if
+   that run (one or more OpenAI chats on overlapping windows when the submission is long,
+   plus OpenAI Embeddings API). Otherwise, if
    ``MULTIMODAL_LLM_TRIO_CHUNKING`` is on, :func:`refine_chunks_trio_with_ollama` runs after
    units exist to label ``question`` / ``student_response`` / ``instructor_context`` via the
    structure client (answer-key snippet alignment still uses answer-key enrich).

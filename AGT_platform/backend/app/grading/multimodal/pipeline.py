@@ -8,7 +8,8 @@ Chunking uses :func:`app.grading.multimodal.rag_embeddings.build_multimodal_grad
 ``OPENAI_API_KEY`` is set and ``MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD`` is not ``off`` (default
 **auto** = on) — then
 :func:`app.grading.multimodal.openai_trio_rag_frontload.run_openai_trio_rag_frontload`
-runs **once** with ``OPENAI_TRIO_RAG_CHAT_MODEL`` (default ``gpt-5.4-nano``) to emit
+runs one or more chat calls (overlapping windows when the submission is long) with
+``OPENAI_TRIO_RAG_CHAT_MODEL`` (default ``gpt-5.4-nano``) to emit
 trio JSON plus OpenAI **Embeddings** for each unit (``OPENAI_TRIO_RAG_EMBEDDING_MODEL``), and
 trio relabeling via ``MULTIMODAL_LLM_TRIO_CHUNKING`` is skipped. Otherwise optional
 :func:`app.grading.multimodal.rag_embeddings.refine_chunks_trio_with_ollama` uses the structure
@@ -26,6 +27,11 @@ embeddings API without frontload) / ``SENTENCE_TRANSFORMERS_MODEL``.
 by :func:`app.grading.multimodal.chunk_cache.save_grading_chunks_cache` to skip rebuilding
 chunks and (when embeddings are present in the file) skip per-unit embedding calls.
 
+**Trio export:** after chunking, the pipeline writes ``{assignment_id}_trio_chunks.json`` under
+``modality_hints["rag_embedding_output_dir"]`` or the repository ``RAG_embedding/`` folder
+(slim trio text per chunk, no embedding vectors). Set ``skip_trio_chunks_json_export`` in hints
+to disable.
+
 **Agentic trace:** ordered phases are stored on the result as
 ``stage_artifacts["agentic_workflow"]`` and copied into grading JSON as ``_agentic_workflow``.
 
@@ -36,8 +42,10 @@ often cause local Ollama timeouts.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -90,6 +98,72 @@ _log = logging.getLogger(__name__)
 def default_answer_key_dir() -> Path:
     """``…/ai-automatic-grader-tool/answer_key`` (repo root)."""
     return Path(__file__).resolve().parents[5] / "answer_key"
+
+
+def default_rag_embedding_dir() -> Path:
+    """``…/ai-automatic-grader-tool/RAG_embedding`` (repo root)."""
+    return Path(__file__).resolve().parents[5] / "RAG_embedding"
+
+
+def _safe_trio_export_stem(assignment_id: str) -> str:
+    s = re.sub(r"[^\w\-.]+", "_", (assignment_id or "assignment").strip())
+    return s[:180] or "assignment"
+
+
+def _trio_chunks_export_payload(chunks: list[GradingChunk]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for ch in chunks:
+        ev = dict(ch.evidence or {})
+        trio = ev.get("trio")
+        if not isinstance(trio, dict):
+            trio = {}
+        rows.append(
+            {
+                "chunk_id": ch.chunk_id,
+                "assignment_id": ch.assignment_id,
+                "student_id": ch.student_id,
+                "question_id": ch.question_id,
+                "extracted_text": ch.extracted_text,
+                "modality": ch.modality.value,
+                "task_type": ch.task_type.value,
+                "trio": {
+                    "question": str(trio.get("question") or ""),
+                    "student_response": str(trio.get("student_response") or ""),
+                    "answer_key_segment": str(trio.get("answer_key_segment") or ""),
+                    "instructor_context": str(trio.get("instructor_context") or ""),
+                },
+            }
+        )
+    return rows
+
+
+def _try_persist_trio_chunks_json(
+    envelope: IngestionEnvelope,
+    chunks: list[GradingChunk],
+    hints: dict[str, Any],
+    wf: Callable[..., None],
+) -> None:
+    if hints.get("skip_trio_chunks_json_export"):
+        return
+    raw_dir = hints.get("rag_embedding_output_dir")
+    root = Path(str(raw_dir)).expanduser() if raw_dir else default_rag_embedding_dir()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _log.warning("Could not create RAG_embedding directory %s: %s", root, exc)
+        return
+    path = root / f"{_safe_trio_export_stem(envelope.assignment_id)}_trio_chunks.json"
+    try:
+        payload = {
+            "assignment_id": envelope.assignment_id,
+            "student_id": envelope.student_id,
+            "n_chunks": len(chunks),
+            "chunks": _trio_chunks_export_payload(chunks),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        wf("persist_trio_chunks_json", path=str(path))
+    except OSError as exc:
+        _log.warning("Could not write trio chunks export %s: %s", path, exc)
 
 
 @dataclass
@@ -323,6 +397,8 @@ class MultimodalGradingPipeline:
                 wf("persist_chunk_cache", path=str(out_p))
             except OSError as exc:
                 _log.warning("Could not save multimodal chunk cache to %s: %s", out_p, exc)
+
+        _try_persist_trio_chunks_json(envelope, chunks, hints, wf)
 
         art.append(
             "chunking",

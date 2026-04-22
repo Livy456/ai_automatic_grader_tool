@@ -68,6 +68,10 @@ REFERENCE ANSWER / ANSWER KEY (when provided in the user payload as ``reference_
 - Prefer the rubric + **quoted student evidence** as the primary basis for scores; use the reference to resolve ambiguity about what “adequate” or “complete” looks like for this assignment.
 - If the reference covers content not present in this chunk, **ignore** that part for this chunk. If the chunk has no reference section, grade from the rubric and student text alone.
 
+PER-CHUNK REFERENCE (``matched_answer_key_for_question`` / ``trio_reference_answer_for_this_chunk``):
+- When present, these are the instructor / answer-key excerpts **scoped to this question only**. Prefer them over the global ``reference_answer_key`` when they conflict or when the global key is truncated.
+- If they show a **minimal** expected solution (e.g. a single import line, one expression) and the student’s submission **matches** that solution (allowing trivial whitespace or harmless comments), treat the work as **complete for that scope**: award the **top** rubric level for **conceptual correctness** (and for “evidence” / “depth” rows when the prompt for that item only required that minimal output—do **not** punish brevity). Quote the student’s matching line as ``evidence``.
+
 Return **only** one JSON object (no markdown fences, no prose outside JSON)."""
 
 
@@ -140,9 +144,13 @@ def build_chunk_grading_prompt(
     ]
     matched_ak = ""
     ev0 = chunk.evidence or {}
+    trio = ev0.get("trio") if isinstance(ev0.get("trio"), dict) else {}
+    trio_ak = str(trio.get("answer_key_segment") or "").strip()
     aku = ev0.get("answer_key_unit")
     if isinstance(aku, dict):
         matched_ak = str(aku.get("snippet") or "").strip()
+    if not matched_ak and trio_ak:
+        matched_ak = trio_ak
     if ak:
         instr_parts.append(
             "\nA reference answer key is provided under reference_answer_key. "
@@ -154,6 +162,13 @@ def build_chunk_grading_prompt(
             "\n**matched_answer_key_for_question** is the instructor / reference material "
             "segment aligned to **this** question (same numbering as chunk.question_id when possible). "
             "Prefer it over the global key when both appear; it may omit unrelated parts of the key."
+        )
+    if trio_ak:
+        instr_parts.append(
+            "\n**trio_reference_answer_for_this_chunk** (when present) is the answer-key line(s) "
+            "paired with this chunk’s trio extraction. If the student response satisfies it "
+            "(including one-line / minimal keys), award full applicable credit for correctness "
+            "and do not treat brevity as missing depth or evidence when the task only required that output."
         )
     if ds:
         instr_parts.append(
@@ -180,6 +195,13 @@ def build_chunk_grading_prompt(
         )
         if len(matched_ak) > cap_q:
             payload["matched_answer_key_for_question_truncated"] = True
+    if trio_ak:
+        cap_t = min(max_chars, 16_000)
+        payload["trio_reference_answer_for_this_chunk"] = (
+            trio_ak[:cap_t] if len(trio_ak) > cap_t else trio_ak
+        )
+        if len(trio_ak) > cap_t:
+            payload["trio_reference_answer_for_this_chunk_truncated"] = True
     if ds:
         payload["matched_dataset_preview"] = ds[:max_chars] if len(ds) > max_chars else ds
         if len(ds) > max_chars:
