@@ -68,6 +68,9 @@ class MultimodalGradingConfig:
     # ``nearest_half`` / ``ceil_half``: snap **up** to the next valid half-step on
     # ``[0, max_points]``, capped at ``max_points`` (ceiling on the 0.5 grid).
     raw_score_invalid_policy: str = "regenerate"
+    # When True, :meth:`MultimodalGradingPipeline.run` raises if no answer key text
+    # is available after ``resolve_answer_key_plaintext`` (integration / production).
+    require_answer_key: bool = False
 
 
 @dataclass

@@ -5,6 +5,7 @@ Evidence-based chunk grading prompts (system + user skeleton).
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from .rag_embeddings import sanitize_evidence_for_grading_prompt
@@ -58,6 +59,9 @@ MODALITY GUIDANCE:
 
 Ignore other questions; grade **only** this chunk.
 
+When ``chunk.evidence.trio`` is present, treat **question** / **student_response** /
+**answer_key_segment** as the primary structured view of this chunk (the joined text may repeat).
+
 REFERENCE ANSWER / ANSWER KEY (when provided in the user payload as ``reference_answer_key``):
 - Use it to **calibrate** expectations for **conceptual correctness**, **depth**, and **evidence quality** — not as a template for verbatim matching.
 - The **student's response does not need to match** the reference wording, structure, length, or examples. Different valid approaches, notation, or ordering should receive **fair credit** when they satisfy the rubric.
@@ -109,6 +113,14 @@ def build_chunk_grading_prompt(
     chunk_dict["evidence"] = sanitize_evidence_for_grading_prompt(
         chunk_dict.get("evidence") or {}
     )
+    try:
+        max_chunk = int(os.getenv("MULTIMODAL_CHUNK_PROMPT_MAX_CHARS", "14000").strip() or 14000)
+    except ValueError:
+        max_chunk = 14_000
+    et = chunk_dict.get("extracted_text") or ""
+    if isinstance(et, str) and len(et) > max_chunk:
+        chunk_dict["extracted_text"] = et[:max_chunk]
+        chunk_dict["extracted_text_prompt_capped"] = True
     ak = (answer_key_text or "").strip()
     ds = (dataset_context_text or "").strip()
     instr_parts = [
@@ -126,11 +138,22 @@ def build_chunk_grading_prompt(
         "Evidence: use a verbatim substring from the student's answer in this chunk (quote), ",
         "not a grader paraphrase.",
     ]
+    matched_ak = ""
+    ev0 = chunk.evidence or {}
+    aku = ev0.get("answer_key_unit")
+    if isinstance(aku, dict):
+        matched_ak = str(aku.get("snippet") or "").strip()
     if ak:
         instr_parts.append(
             "\nA reference answer key is provided under reference_answer_key. "
             "Use it to judge correctness and depth as described in the system prompt; "
             "the student need not match it exactly."
+        )
+    if matched_ak:
+        instr_parts.append(
+            "\n**matched_answer_key_for_question** is the instructor / reference material "
+            "segment aligned to **this** question (same numbering as chunk.question_id when possible). "
+            "Prefer it over the global key when both appear; it may omit unrelated parts of the key."
         )
     if ds:
         instr_parts.append(
@@ -150,6 +173,13 @@ def build_chunk_grading_prompt(
         payload["reference_answer_key"] = ak[:max_chars] if len(ak) > max_chars else ak
         if len(ak) > max_chars:
             payload["reference_answer_key_truncated"] = True
+    if matched_ak:
+        cap_q = min(max_chars, 16_000)
+        payload["matched_answer_key_for_question"] = (
+            matched_ak[:cap_q] if len(matched_ak) > cap_q else matched_ak
+        )
+        if len(matched_ak) > cap_q:
+            payload["matched_answer_key_for_question_truncated"] = True
     if ds:
         payload["matched_dataset_preview"] = ds[:max_chars] if len(ds) > max_chars else ds
         if len(ds) > max_chars:

@@ -393,4 +393,7 @@ def multimodal_assignment_to_grading_dict(
         out["_model_used"] = ", ".join(model_ids)
     if modality_profile is not None:
         out["_modality"] = modality_profile
+    aw = (result.stage_artifacts or {}).get("agentic_workflow")
+    if isinstance(aw, list) and aw:
+        out["_agentic_workflow"] = aw
     return out

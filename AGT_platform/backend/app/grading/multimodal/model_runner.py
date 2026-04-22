@@ -1,10 +1,11 @@
 """
 Protocol for M models × k samples per chunk.
 
-``MultiModelChunkRunner`` uses :func:`app.grading.llm_router.build_grading_clients`
-(primary Ollama + ``GRADING_MODEL_2`` + ``GRADING_MODEL_3``) and draws
-``GRADING_SAMPLES_PER_MODEL`` stochastic samples per model at
-``GRADING_SAMPLE_TEMPERATURE`` — same knobs as the legacy entropy grading path.
+``MultiModelChunkRunner`` uses :func:`app.grading.llm_router.build_multimodal_grading_clients`
+(primary **openai**, Ollama, or Hugging Face per ``MULTIMODAL_LLM_BACKEND``, plus optional
+``GRADING_MODEL_2`` / ``GRADING_MODEL_3``) and draws
+``MULTIMODAL_SAMPLES_PER_MODEL`` stochastic samples **per client** at
+``GRADING_SAMPLE_TEMPERATURE``.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import logging
 from typing import Any, Callable, Protocol
 
 from app.config import Config
-from app.grading.llm_router import ChatClient, build_grading_clients
+from app.grading.llm_router import ChatClient, build_multimodal_grading_clients
 
 from .schemas import GradingChunk, SampledChunkGrade
 
@@ -96,8 +97,8 @@ class MockChunkModelRunner:
 
 class MultiModelChunkRunner:
     """
-    For each configured grading client (up to three when ``GRADING_MODEL_2`` /
-    ``GRADING_MODEL_3`` are set), run ``GRADING_SAMPLES_PER_MODEL`` ``chat_json`` calls.
+    For each configured grading client, run ``MULTIMODAL_SAMPLES_PER_MODEL``
+    ``chat_json`` calls (default 5 for a single primary Ollama model).
 
     Semantic entropy over parsed outcomes is computed in
     :class:`MultimodalGradingPipeline` from cluster assignments of these samples.
@@ -110,7 +111,9 @@ class MultiModelChunkRunner:
         build_clients: ClientBuilder | None = None,
     ):
         self._cfg = cfg
-        self._build_clients: ClientBuilder = build_clients or build_grading_clients
+        self._build_clients: ClientBuilder = (
+            build_clients or build_multimodal_grading_clients
+        )
 
     @property
     def app_config(self) -> Config:
@@ -124,15 +127,15 @@ class MultiModelChunkRunner:
         user_prompt: str,
     ) -> list[SampledChunkGrade]:
         clients = self._build_clients(self._cfg)
-        k = max(1, int(getattr(self._cfg, "GRADING_SAMPLES_PER_MODEL", 1)))
+        k = max(1, int(getattr(self._cfg, "MULTIMODAL_SAMPLES_PER_MODEL", 5)))
         temp = float(getattr(self._cfg, "GRADING_SAMPLE_TEMPERATURE", 0.3))
 
-        if len(clients) < 3:
-            _log.info(
-                "Multimodal grading has %s model(s); configure GRADING_MODEL_2 and "
-                "GRADING_MODEL_3 for three models (primary Ollama is always included).",
-                len(clients),
-            )
+        _log.debug(
+            "Multimodal grading: %d model(s), %d sample(s) each → %d total calls/chunk",
+            len(clients),
+            k,
+            len(clients) * k,
+        )
 
         messages = [
             {"role": "system", "content": system_prompt},

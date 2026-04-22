@@ -1,5 +1,5 @@
 """
-Build embedding vectors for submission text (OpenAI, Ollama, or hash fallback).
+Build embedding vectors for submission text (SentenceTransformers, OpenAI, Ollama, or hash fallback).
 """
 
 from __future__ import annotations
@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,9 @@ import requests
 from ..config import Config
 
 _log = logging.getLogger(__name__)
+
+_st_lock = threading.Lock()
+_st_models: dict[str, Any] = {}
 
 
 def deterministic_hash_embedding(text: str, dimensions: int = 256) -> list[float]:
@@ -42,18 +46,72 @@ def _openai_embed_snippet(snippet: str, cfg: Config) -> tuple[list[float], str] 
     key = (cfg.OPENAI_API_KEY or "").strip()
     if not key or not snippet:
         return None
+    model = (
+        (getattr(cfg, "OPENAI_TRIO_RAG_EMBEDDING_MODEL", "") or "").strip()
+        or "text-embedding-3-small"
+    )
     try:
         from openai import OpenAI
 
         client = OpenAI(api_key=key)
         resp = client.embeddings.create(
-            model="text-embedding-3-small",
+            model=model,
             input=snippet[:8000],
         )
         vec = list(resp.data[0].embedding)
-        return vec, "openai:text-embedding-3-small"
+        return vec, f"openai:{model}"
     except Exception as exc:
         _log.warning("OpenAI embedding failed (%s); trying other fallbacks", exc)
+        return None
+
+
+def _get_sentence_transformer(model_name: str) -> Any:
+    """Lazy singleton per model id (thread-safe)."""
+    with _st_lock:
+        if model_name not in _st_models:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as e:
+                raise RuntimeError(
+                    "sentence-transformers is not installed. "
+                    "pip install sentence-transformers"
+                ) from e
+            _log.info("Loading SentenceTransformer %r …", model_name)
+            _st_models[model_name] = SentenceTransformer(model_name)
+        return _st_models[model_name]
+
+
+def sentence_transformers_embed_text(text: str, cfg: Config) -> tuple[list[float], str] | None:
+    """
+    Encode a single text chunk with :class:`sentence_transformers.SentenceTransformer`.
+
+    Returns ``None`` on empty input, import failure, or encode errors (caller may fall back).
+    """
+    snippet = (text or "").strip()
+    if not snippet:
+        return None
+    model_name = (getattr(cfg, "SENTENCE_TRANSFORMERS_MODEL", "") or "").strip()
+    if not model_name:
+        model_name = "all-MiniLM-L6-v2"
+    try:
+        model = _get_sentence_transformer(model_name)
+    except Exception as exc:
+        _log.warning("SentenceTransformer load failed for %r: %s", model_name, exc)
+        return None
+    try:
+        vec = model.encode(
+            snippet,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        if getattr(vec, "ndim", 0) > 1:
+            vec = vec[0]
+        out = np.asarray(vec, dtype=np.float64).ravel()
+        if out.size < 8:
+            return None
+        return out.tolist(), f"sentence_transformers:{model_name}"
+    except Exception as exc:
+        _log.warning("SentenceTransformer encode failed: %s", exc)
         return None
 
 
@@ -118,12 +176,44 @@ def compute_submission_embedding(text: str, cfg: Config) -> tuple[list[float], s
     """
     Return (vector, source_description).
 
-    Order is controlled by ``RAG_EMBED_ORDER``. Default **auto** tries OpenAI before Ollama
-    when ``OPENAI_API_KEY`` is set, so hosts without Ollama embedding routes still get
-    semantic vectors without noisy 404 warnings.
+    Primary path is ``RAG_EMBEDDING_BACKEND``:
+
+    - ``sentence_transformers`` (default): local :class:`sentence_transformers.SentenceTransformer`
+      (``SENTENCE_TRANSFORMERS_MODEL``, default ``all-MiniLM-L6-v2``). On failure, falls back
+      to the OpenAI/Ollama order from ``RAG_EMBED_ORDER``, then deterministic hash.
+    - ``openai``: OpenAI Embeddings API (``OPENAI_TRIO_RAG_EMBEDDING_MODEL``, requires
+      ``OPENAI_API_KEY``); on failure falls back to sentence_transformers then hash.
+    - ``ollama``: legacy behavior — order from ``RAG_EMBED_ORDER`` (OpenAI + Ollama), then hash.
     """
     max_c = int(getattr(cfg, "RAG_EMBED_MAX_CHARS", 24000))
     snippet = (text or "")[:max_c]
+
+    backend = (getattr(cfg, "RAG_EMBEDDING_BACKEND", "") or "sentence_transformers").strip().lower()
+    if backend not in ("ollama", "sentence_transformers", "openai"):
+        _log.warning("Unknown RAG_EMBEDDING_BACKEND=%r; using sentence_transformers", backend)
+        backend = "sentence_transformers"
+
+    if backend == "openai":
+        hit = _openai_embed_snippet(snippet, cfg)
+        if hit:
+            return hit
+        _log.warning(
+            "RAG_EMBEDDING_BACKEND=openai failed; falling back to sentence_transformers"
+        )
+        hit = sentence_transformers_embed_text(snippet, cfg)
+        if hit:
+            return hit
+        dim = 256
+        return deterministic_hash_embedding(snippet, dim), "deterministic_hash:sha256×256"
+
+    if backend == "sentence_transformers":
+        hit = sentence_transformers_embed_text(snippet, cfg)
+        if hit:
+            return hit
+        _log.warning(
+            "RAG_EMBEDDING_BACKEND=sentence_transformers failed; falling back to "
+            "OpenAI/Ollama per RAG_EMBED_ORDER"
+        )
 
     order = (getattr(cfg, "RAG_EMBED_ORDER", "auto") or "auto").strip().lower()
     key_ok = bool((cfg.OPENAI_API_KEY or "").strip())

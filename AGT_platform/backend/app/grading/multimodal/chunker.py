@@ -102,11 +102,20 @@ def default_chunker_build_units(
             u.get("response_text") or "",
         ]
         extracted = "\n\n".join(p for p in text_parts if str(p).strip()).strip()
+        qt = str(u.get("question_text") or "").strip()
+        rt = str(u.get("response_text") or "").strip()
         ev = {
             "chunk_ids": u.get("chunk_ids"),
             "unit": u,
             "source_pair_id": u.get("pair_id"),
             "canonical_pair_index": i,
+            "question_text": qt[:2000],
+            "trio": {
+                "question": qt,
+                "student_response": rt,
+                "instructor_context": "",
+                "answer_key_segment": "",
+            },
         }
         out.append(
             GradingChunk(

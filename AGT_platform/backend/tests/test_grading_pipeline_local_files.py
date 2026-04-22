@@ -24,26 +24,26 @@ generic files use :data:`DEFAULT_STANDALONE_RUBRIC` as row templates.
 ``rubric/<assignment_basename>.{json,md,txt}`` as before.
 
 Grading uses :class:`app.grading.multimodal.MultimodalGradingPipeline` with
-:class:`app.grading.multimodal.MultiModelChunkRunner` (``GRADING_SAMPLES_PER_MODEL`` /
-``GRADING_SAMPLE_TEMPERATURE`` per configured model from ``Config``), then maps the
+:class:`app.grading.multimodal.MultiModelChunkRunner` (``MULTIMODAL_SAMPLES_PER_MODEL`` /
+``GRADING_SAMPLE_TEMPERATURE`` per configured client from ``Config``), then maps the
 result to the shared grading JSON shape via :func:`multimodal_assignment_to_grading_dict`.
 
-Requires a running Ollama (and optional ``GRADING_MODEL_2`` / ``GRADING_MODEL_3``)
-matching ``Config``.
+Requires a running Ollama matching ``OLLAMA_MODEL`` (and optional ``GRADING_MODEL_2`` /
+``GRADING_MODEL_3`` if you enable extra clients).
 
 **Why this test can run a long time (it is usually not stuck):** the multimodal pipeline
 calls Ollama ``/api/chat`` **sequentially** — for each text chunk,
-``len(build_grading_clients(cfg)) * GRADING_SAMPLES_PER_MODEL`` requests. Long submissions
-split into many chunks; ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` triple the call count;
-``GRADING_SAMPLES_PER_MODEL`` > 1 multiplies it again. Each call can take up to
+``len(build_multimodal_grading_clients(cfg)) * MULTIMODAL_SAMPLES_PER_MODEL`` requests. Long submissions
+split into many chunks; optional extra grading models multiply the call count;
+``MULTIMODAL_SAMPLES_PER_MODEL`` > 1 multiplies it again. Each call can take up to
 ``OLLAMA_CHAT_TIMEOUT_SEC`` (default 300s) if the model is slow or overloaded.
 
 **Fast defaults for this test** (so ``pytest`` finishes in minutes, not hours):
 
 - ``MULTIMODAL_LOCAL_TEST_MAX_ASSIGNMENTS`` defaults to **1** (first basename only).
   Set to ``0`` or ``all`` to grade every assignment under ``assignments_to_grade/``.
-- ``MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES`` defaults to **1** (overrides ``Config`` for
-  this test). Set to ``from_config`` to use ``GRADING_SAMPLES_PER_MODEL`` from ``.env``,
+- ``MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES`` defaults to **1** (overrides ``MULTIMODAL_SAMPLES_PER_MODEL`` for
+  this test). Set to ``from_config`` to use ``MULTIMODAL_SAMPLES_PER_MODEL`` from ``.env``,
   or set an explicit integer 1–16.
 - ``MULTIMODAL_LOCAL_TEST_MAX_GRADING_UNITS`` defaults to **8** (caps multimodal chunk
   units per assignment). Set to ``0`` or ``all`` for no cap.
@@ -431,30 +431,30 @@ def _multimodal_local_test_max_grading_units() -> int | None:
 
 def _multimodal_local_test_grading_samples_override(cfg: Config) -> None:
     """
-    Per-test override for ``GRADING_SAMPLES_PER_MODEL`` (instance attribute only).
+    Per-test override for ``MULTIMODAL_SAMPLES_PER_MODEL`` (instance attribute only).
 
     Default when env unset: **1** (fast). Set ``from_config`` to use ``Config`` from ``.env``.
 
     .. note::
 
-       Meaningful semantic entropy requires **k >= 3** samples (ideally from 2+ models).
-       With k=1, entropy is always 0 and ai_confidence is always 1.0 — this is by design
-       for fast test iteration, not a bug. To get real confidence signal, set
-       ``MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES=3`` (or higher) and optionally configure
-       ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` in ``.env``.
+       Meaningful semantic entropy needs **several** stochastic samples from the same
+       model (or multiple models). With k=1, entropy is always 0 and ai_confidence is
+       always 1.0 — by design for fast test iteration. For a real signal, set
+       ``MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES=5`` (or use ``from_config`` with production
+       ``MULTIMODAL_SAMPLES_PER_MODEL`` in ``.env``).
     """
     raw = os.getenv("MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES", "").strip()
     if raw == "":
-        cfg.GRADING_SAMPLES_PER_MODEL = 1
+        cfg.MULTIMODAL_SAMPLES_PER_MODEL = 1
         return
     if raw.lower() in ("from_config", "use_config", "config"):
         return
     try:
         k = int(raw, 10)
     except ValueError:
-        cfg.GRADING_SAMPLES_PER_MODEL = 1
+        cfg.MULTIMODAL_SAMPLES_PER_MODEL = 1
         return
-    cfg.GRADING_SAMPLES_PER_MODEL = max(1, min(k, 16))
+    cfg.MULTIMODAL_SAMPLES_PER_MODEL = max(1, min(k, 16))
 
 
 def _build_artifacts(paths: list[Path]) -> dict[str, bytes]:
@@ -480,7 +480,7 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
 
     def test_grade_local_assignments_write_json(self) -> None:
         # Bind in function scope so subtests always see it (avoids NameError if a module-level import is missing).
-        from app.grading.llm_router import build_grading_clients
+        from app.grading.llm_router import build_multimodal_grading_clients
 
         groups = _assignment_groups()
         if not groups:
@@ -595,8 +595,8 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                     task_desc_parts.append(rubric_text)
                 task_description = "\n\n".join(task_desc_parts)
 
-                n_models = len(build_grading_clients(cfg))
-                k_samples = max(1, int(getattr(cfg, "GRADING_SAMPLES_PER_MODEL", 1)))
+                n_models = len(build_multimodal_grading_clients(cfg))
+                k_samples = max(1, int(getattr(cfg, "MULTIMODAL_SAMPLES_PER_MODEL", 5)))
                 n_grading_units = len(build_grading_units_from_chunks(chunks))
                 u_cap = _multimodal_local_test_max_grading_units()
                 if u_cap is not None:

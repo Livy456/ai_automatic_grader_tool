@@ -149,6 +149,7 @@ def aggregate_chunk_samples(
     *,
     cluster_counts: dict[str, int],
     cfg: MultimodalGradingConfig,
+    rubric_fallback_names: list[str] | None = None,
 ) -> ChunkGradeOutcome:
     valid_norms = [
         s.parsed.normalized_score
@@ -172,6 +173,9 @@ def aggregate_chunk_samples(
         for k, v in m.items():
             acc[k].append(v)
     consensus_crit = {k: sum(vs) / len(vs) for k, vs in acc.items()}
+    fb = [str(n).strip() for n in (rubric_fallback_names or []) if str(n).strip()]
+    if not consensus_crit and fb:
+        consensus_crit = {n: 0.0 for n in fb}
 
     acc_raw: dict[str, list[float]] = defaultdict(list)
     for s in valid_parsed:
@@ -181,6 +185,8 @@ def aggregate_chunk_samples(
         for cs in p.criterion_scores:
             acc_raw[cs.name].append(float(cs.score))
     consensus_raw = {k: sum(vs) / len(vs) for k, vs in acc_raw.items()}
+    if not consensus_raw and fb:
+        consensus_raw = {n: 0.0 for n in fb}
 
     justifications, evidence, reasoning = align_criterion_text_maps_to_consensus(
         valid_parsed, consensus_crit
@@ -189,6 +195,11 @@ def aggregate_chunk_samples(
         valid_parsed, consensus_crit, evidence
     )
     confidence_note = _confidence_note_from_nearest_sample(valid_parsed, estimate)
+    if not valid_parsed:
+        confidence_note = (
+            f"[{chunk_id}] No valid model JSON (all samples failed: timeouts, HTTP errors, "
+            "or parse errors). Scores default to 0."
+        )
 
     n = max(1, len(samples))
     parse_fail_rate = sum(1 for s in samples if not s.parse_ok) / n

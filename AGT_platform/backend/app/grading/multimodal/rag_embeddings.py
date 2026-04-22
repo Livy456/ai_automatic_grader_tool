@@ -1,7 +1,9 @@
 """
 RAG-style chunk embeddings and optional Ollama Q→A segmentation for multimodal grading.
 
-Aligns with :mod:`app.grading.rag_embeddings` (same ``compute_submission_embedding`` order).
+Aligns with :mod:`app.grading.rag_embeddings` — per-chunk vectors from
+:func:`app.grading.rag_embeddings.compute_submission_embedding` (default
+``RAG_EMBEDDING_BACKEND=sentence_transformers`` / ``SENTENCE_TRANSFORMERS_MODEL``).
 
 **Chunking stack** (see ``new_chunking_method.md``):
 
@@ -9,10 +11,19 @@ Aligns with :mod:`app.grading.rag_embeddings` (same ``compute_submission_embeddi
 2. Otherwise **PDF plaintext** is reflowed via
    :func:`app.grading.submission_chunks.reflow_pdf_sections_in_plaintext` before any LLM
    segmentation so verticalized extractors do not confuse the model.
-3. If ``MULTIMODAL_OLLAMA_QA_SEGMENT`` is on, Ollama returns JSON Q/A units; on failure,
+3. If ``MULTIMODAL_OLLAMA_QA_SEGMENT`` is on, the **structure LLM** (Ollama or Hugging Face
+   per ``MULTIMODAL_LLM_BACKEND``) returns JSON Q/A units; on failure,
    :func:`chunker.default_chunker_build_units` runs structured chunking
    (:func:`app.grading.submission_chunks.build_submission_chunks`, which reflows each PDF
    section again and applies journal-style prompt boundaries when hints match).
+4. If ``OPENAI_API_KEY`` is set and OpenAI trio frontload is enabled (default **auto**;
+   disable with ``MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD=off``),
+   :func:`app.grading.multimodal.openai_trio_rag_frontload.run_openai_trio_rag_frontload`
+   replaces steps 3–4 for
+   that run (single OpenAI chat + OpenAI Embeddings API). Otherwise, if
+   ``MULTIMODAL_LLM_TRIO_CHUNKING`` is on, :func:`refine_chunks_trio_with_ollama` runs after
+   units exist to label ``question`` / ``student_response`` / ``instructor_context`` via the
+   structure client (answer-key snippet alignment still uses answer-key enrich).
 """
 
 from __future__ import annotations
@@ -22,7 +33,16 @@ import os
 from typing import Any
 
 from app.config import Config
-from app.grading.llm_router import OllamaClient
+from app.grading.llm_router import (
+    OllamaClient,
+    OpenAIJsonClient,
+    _ollama_keep_alive,
+    huggingface_grading_model_id,
+    huggingface_json_client_from_config,
+    multimodal_llm_backend_uses_huggingface,
+    multimodal_llm_backend_uses_openai,
+    openai_multimodal_grading_model,
+)
 from app.grading.rag_embeddings import compute_submission_embedding
 
 from app.grading.submission_chunks import reflow_pdf_sections_in_plaintext
@@ -50,15 +70,92 @@ def multimodal_rag_embed_units_enabled() -> bool:
     return _env_bool("MULTIMODAL_RAG_EMBED_UNITS", default=True)
 
 
-def _qa_segment_model(cfg: Config) -> str:
-    m = os.getenv("MULTIMODAL_QA_SEGMENT_MODEL", "").strip()
+def multimodal_llm_trio_chunking_enabled(cfg: Config | None = None) -> bool:
+    """True when Ollama should re-label each chunk's ``evidence['trio']`` before AK enrich."""
+    if cfg is not None and bool(getattr(cfg, "MULTIMODAL_LLM_TRIO_CHUNKING", False)):
+        return True
+    return _env_bool("MULTIMODAL_LLM_TRIO_CHUNKING", default=False)
+
+
+def _multimodal_structure_llm_model(cfg: Config) -> str:
+    """
+    Ollama model for (a) optional PDF/plain Q→A JSON segmentation and (b) optional trio LLM chunking.
+
+    Precedence: ``MULTIMODAL_TRIO_CHUNKING_MODEL`` → ``OLLAMA_MODEL`` →
+    ``MULTIMODAL_QA_SEGMENT_MODEL`` (env) → ``llama3.2:1b``.
+    """
+    m = (getattr(cfg, "MULTIMODAL_TRIO_CHUNKING_MODEL", "") or "").strip()
     if m:
         return m
+    om = (getattr(cfg, "OLLAMA_MODEL", "") or "").strip()
+    if om:
+        return om
+    q = os.getenv("MULTIMODAL_QA_SEGMENT_MODEL", "").strip()
+    if q:
+        return q
     return "llama3.2:1b"
+
+
+def _qa_segment_model(cfg: Config) -> str:
+    return _multimodal_structure_llm_model(cfg)
 
 
 def _ollama_base(cfg: Config) -> str:
     return (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
+
+
+def _multimodal_structure_chat_client(cfg: Config, *, purpose: str = "trio"):
+    """
+    Return (client, model_label) for optional QA segmentation and trio chunking.
+
+    When ``MULTIMODAL_LLM_BACKEND`` is ``huggingface`` / ``hf``, uses local transformers
+    (:func:`~app.grading.llm_router.huggingface_json_client_from_config`). When it is
+    ``openai``, uses :class:`~app.grading.llm_router.OpenAIJsonClient`` (requires
+    ``OPENAI_API_KEY``). Otherwise uses Ollama (requires ``OLLAMA_BASE_URL``).
+
+    ``purpose`` selects HTTP read timeout for Ollama only: ``"qa"`` (segmentation) vs
+    ``"trio"`` (chunk relabeling).
+    """
+    if multimodal_llm_backend_uses_huggingface(cfg):
+        try:
+            mid = huggingface_grading_model_id(cfg)
+            return huggingface_json_client_from_config(cfg, mid), mid
+        except Exception:
+            _log.warning(
+                "Could not build Hugging Face structure LLM client; trio/QA segment skipped.",
+                exc_info=True,
+            )
+            return None, ""
+    if multimodal_llm_backend_uses_openai(cfg):
+        key = (cfg.OPENAI_API_KEY or "").strip()
+        if not key:
+            _log.warning(
+                "MULTIMODAL_LLM_BACKEND=openai but OPENAI_API_KEY is empty; "
+                "structure QA/trio client unavailable."
+            )
+            return None, ""
+        mid = openai_multimodal_grading_model(cfg)
+        return OpenAIJsonClient(key, mid), f"openai:{mid}"
+    base = _ollama_base(cfg)
+    if not base:
+        return None, ""
+    model = _multimodal_structure_llm_model(cfg)
+    if purpose == "qa":
+        tout = _qa_segment_http_timeout_sec(cfg)
+    else:
+        try:
+            tout = float(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 300))
+            tout = min(1800.0, max(60.0, tout))
+        except (TypeError, ValueError):
+            tout = 300.0
+    client = OllamaClient(
+        base,
+        model,
+        request_json_format=getattr(cfg, "OLLAMA_CHAT_JSON_FORMAT", True),
+        timeout_sec=tout,
+        keep_alive=_ollama_keep_alive(cfg),
+    )
+    return client, model
 
 
 def _chat_timeout(cfg: Config) -> float:
@@ -86,16 +183,9 @@ def _chunks_from_ollama_qa_segmentation(
     plain = reflow_pdf_sections_in_plaintext((envelope.extracted_plaintext or "").strip())
     if not plain:
         return None
-    base = _ollama_base(cfg)
-    if not base:
+    client, model = _multimodal_structure_chat_client(cfg, purpose="qa")
+    if client is None:
         return None
-    model = _qa_segment_model(cfg)
-    client = OllamaClient(
-        base,
-        model,
-        request_json_format=getattr(cfg, "OLLAMA_CHAT_JSON_FORMAT", True),
-        timeout_sec=_qa_segment_http_timeout_sec(cfg),
-    )
     # Full submission text so Q/A segmentation sees the entire document (model context limits may still apply).
     user = plain
     try:
@@ -143,6 +233,12 @@ def _chunks_from_ollama_qa_segmentation(
                     "response_text": r,
                     "chunker": "ollama_qa_segment",
                     "canonical_pair_index": i,
+                    "trio": {
+                        "question": q,
+                        "student_response": r,
+                        "instructor_context": "",
+                        "answer_key_segment": "",
+                    },
                 },
             )
         )
@@ -161,14 +257,116 @@ def _chunks_from_ollama_qa_segmentation(
     return out
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        raw = os.getenv(name, "").strip()
+        return int(raw) if raw else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _chunks_use_openai_trio_rag_frontload(chunks: list[GradingChunk]) -> bool:
+    """True when every chunk already has OpenAI-produced trio segment + bundle vectors."""
+    if not chunks:
+        return False
+    for ch in chunks:
+        ev = ch.evidence or {}
+        if not ev.get("_openai_trio_rag_frontload"):
+            return False
+        tr = ev.get("trio_segment_rag")
+        rb = ev.get("rag_embedding_bundle")
+        if not isinstance(tr, dict) or not isinstance(rb, dict):
+            return False
+        src = str(rb.get("embedding_source") or "")
+        if "openai:" not in src:
+            return False
+    return True
+
+
 def enrich_chunks_with_rag_embeddings(chunks: list[GradingChunk], cfg: Config) -> None:
-    """Attach per-unit vectors via :func:`compute_submission_embedding` (same stack as legacy RAG)."""
+    """
+    Attach per-unit vectors via :func:`compute_submission_embedding`.
+
+    When ``evidence["trio"]`` is present (question / student_response / answer_key_segment),
+    embed each non-empty segment into ``trio_segment_rag`` and set ``rag_embedding_bundle``
+    from a canonical ``[QUESTION] / [STUDENT] / [REFERENCE]`` join (fallback: ``extracted_text``).
+    """
     if not multimodal_rag_embed_units_enabled():
         return
+    if _chunks_use_openai_trio_rag_frontload(chunks):
+        return
+    q_cap = _env_int("MULTIMODAL_TRIO_EMBED_QUESTION_MAX_CHARS", 12_000)
+    r_cap = _env_int("MULTIMODAL_TRIO_EMBED_RESPONSE_MAX_CHARS", 16_000)
+    ak_cap = _env_int("MULTIMODAL_TRIO_EMBED_ANSWER_KEY_MAX_CHARS", 16_000)
+    canon_cap = _env_int("MULTIMODAL_TRIO_CANONICAL_EMBED_MAX_CHARS", 24_000)
+
     for ch in chunks:
+        ev = dict(ch.evidence or {})
+        trio = ev.get("trio")
+        if isinstance(trio, dict):
+            tq = str(trio.get("question") or "").strip()[:q_cap]
+            tsr = str(trio.get("student_response") or "").strip()[:r_cap]
+            tak = str(trio.get("answer_key_segment") or "").strip()[:ak_cap]
+            seg_rag: dict[str, Any] = {}
+            for key, blob in (
+                ("question", tq),
+                ("student_response", tsr),
+                ("answer_key_segment", tak),
+            ):
+                b = (blob or "").strip()
+                if not b:
+                    seg_rag[key] = {
+                        "embedding_dimension": 0,
+                        "embedding_source": "empty_segment_skipped",
+                        "embedding": [],
+                    }
+                    continue
+                try:
+                    vec, src = compute_submission_embedding(b, cfg)
+                except Exception:
+                    _log.warning(
+                        "trio_segment_rag embed failed (%s / %s)",
+                        ch.chunk_id,
+                        key,
+                        exc_info=True,
+                    )
+                    vec, src = [], "embedding_failed"
+                seg_rag[key] = {
+                    "embedding_dimension": len(vec),
+                    "embedding_source": src,
+                    "embedding": vec,
+                }
+            ev["trio_segment_rag"] = seg_rag
+            canon_parts: list[str] = []
+            if tq:
+                canon_parts.append(f"[QUESTION]\n{tq}")
+            if tsr:
+                canon_parts.append(f"[STUDENT]\n{tsr}")
+            if tak:
+                canon_parts.append(f"[REFERENCE]\n{tak}")
+            canon = "\n\n".join(canon_parts).strip()
+            if not canon:
+                canon = (ch.extracted_text or "").strip() or " "
+            canon = canon[:canon_cap]
+            try:
+                vec2, src2 = compute_submission_embedding(canon, cfg)
+            except Exception:
+                _log.warning(
+                    "trio canonical rag_embedding_bundle failed (%s)",
+                    ch.chunk_id,
+                    exc_info=True,
+                )
+                vec2, src2 = [], "embedding_failed"
+            ev["rag_embedding_bundle"] = {
+                "embedding_dimension": len(vec2),
+                "embedding_source": f"trio_canonical:{src2}",
+                "embedding": vec2,
+            }
+            ch.evidence = ev
+            continue
+
         txt = (ch.extracted_text or "").strip() or " "
         vec, src = compute_submission_embedding(txt, cfg)
-        ev = dict(ch.evidence or {})
         ev["rag_embedding_bundle"] = {
             "embedding_dimension": len(vec),
             "embedding_source": src,
@@ -183,6 +381,89 @@ def _get_ipynb_bytes(envelope: IngestionEnvelope) -> bytes | None:
     if isinstance(raw, (bytes, bytearray)):
         return bytes(raw)
     return None
+
+
+_TRIO_LLM_SYSTEM = """You split one assignment grading unit into three fields for downstream RAG and grading.
+The input may mix instructor scaffolding, the assignment prompt, and the student's answer (markdown and/or code).
+Return **only** valid JSON (no markdown fences, no prose outside the JSON object):
+{"question":"the assigned prompt or problem statement only",
+ "student_response":"everything the student authored as their answer for this unit",
+ "instructor_context":"read-only setup, hidden tests, template or boilerplate not written by the student; use an empty string if none"}
+Rules:
+- Prefer copying phrases from the input; do not invent requirements or grades.
+- Do not include official answer keys or full sample solutions in any field; if the input contains an instructor solution block, put at most one short neutral note in instructor_context or leave it empty.
+- Use empty strings for fields that do not apply."""
+
+
+def refine_chunks_trio_with_ollama(chunks: list[GradingChunk], cfg: Config) -> None:
+    """
+    For each chunk, call Ollama once to populate ``evidence["trio"]`` (question /
+    student_response / instructor_context). ``answer_key_segment`` is left unchanged here
+    and is filled by :func:`answer_key_chunk_enrich.enrich_chunks_with_per_question_answer_key`.
+
+    Controlled by ``MULTIMODAL_LLM_TRIO_CHUNKING`` / ``cfg.MULTIMODAL_LLM_TRIO_CHUNKING`` and
+    the structure LLM from :func:`_multimodal_structure_chat_client` (Ollama or Hugging Face).
+    """
+    if not chunks or not multimodal_llm_trio_chunking_enabled(cfg):
+        return
+    client, model = _multimodal_structure_chat_client(cfg, purpose="trio")
+    if client is None:
+        _log.warning(
+            "refine_chunks_trio_with_ollama: no structure LLM client "
+            "(set Ollama URL or MULTIMODAL_LLM_BACKEND=huggingface with HF token)"
+        )
+        return
+    try:
+        cap = int(os.getenv("MULTIMODAL_LLM_TRIO_INPUT_MAX_CHARS", "28000") or 28000)
+    except ValueError:
+        cap = 28_000
+    cap = max(4000, min(cap, 120_000))
+    for ch in chunks:
+        ev0 = ch.evidence or {}
+        if ev0.get("trio_llm_refined"):
+            continue
+        raw_in = (ch.extracted_text or "").strip()
+        if not raw_in:
+            continue
+        user_payload = raw_in[:cap]
+        try:
+            obj = client.chat_json(
+                [
+                    {"role": "system", "content": _TRIO_LLM_SYSTEM},
+                    {"role": "user", "content": user_payload},
+                ],
+                temperature=0.1,
+            )
+        except Exception:
+            _log.warning(
+                "trio LLM chunking failed chunk_id=%s model=%s",
+                ch.chunk_id,
+                model,
+                exc_info=True,
+            )
+            continue
+        if not isinstance(obj, dict):
+            continue
+        q = str(obj.get("question", "") or "").strip()
+        s = str(obj.get("student_response", "") or "").strip()
+        ic = str(obj.get("instructor_context", "") or "").strip()
+        ev = dict(ch.evidence or {})
+        prev = ev.get("trio") if isinstance(ev.get("trio"), dict) else {}
+        ak_seg = str((prev or {}).get("answer_key_segment") or "")
+        ev["trio"] = {
+            "question": q or str((prev or {}).get("question") or ""),
+            "student_response": s or str((prev or {}).get("student_response") or ""),
+            "instructor_context": ic or str((prev or {}).get("instructor_context") or ""),
+            "answer_key_segment": ak_seg,
+        }
+        joined = "\n\n".join(
+            p for p in (ev["trio"]["question"], ev["trio"]["student_response"]) if p
+        ).strip()
+        if joined:
+            ch.extracted_text = joined
+        ev["trio_llm_refined"] = True
+        ev["trio_llm_chunking_model"] = model
+        ch.evidence = ev
 
 
 def build_multimodal_grading_chunks(
@@ -248,6 +529,42 @@ def sanitize_evidence_for_grading_prompt(evidence: dict[str, Any]) -> dict[str, 
             rb.pop("embedding", None)
             rb["embedding_omitted_from_prompt"] = True
             out[k] = rb
+        elif k == "answer_key_unit" and isinstance(v, dict):
+            au = dict(v)
+            rag = au.get("answer_key_rag")
+            if isinstance(rag, dict):
+                rag = dict(rag)
+                rag.pop("embedding", None)
+                rag["embedding_omitted_from_prompt"] = True
+                au["answer_key_rag"] = rag
+            out[k] = au
+        elif k == "trio_segment_rag" and isinstance(v, dict):
+            out[k] = {}
+            for sk, sv in v.items():
+                if isinstance(sv, dict):
+                    d = dict(sv)
+                    d.pop("embedding", None)
+                    d["embedding_omitted_from_prompt"] = True
+                    out[k][sk] = d
+                else:
+                    out[k][sk] = sv
+        elif k == "_openai_trio_rag_frontload":
+            continue
+        elif k == "trio" and isinstance(v, dict):
+            tq = _env_int("MULTIMODAL_TRIO_PROMPT_QUESTION_MAX_CHARS", 8_000)
+            tr = _env_int("MULTIMODAL_TRIO_PROMPT_RESPONSE_MAX_CHARS", 12_000)
+            ta = _env_int("MULTIMODAL_TRIO_PROMPT_ANSWER_KEY_MAX_CHARS", 12_000)
+            ti = _env_int("MULTIMODAL_TRIO_PROMPT_INSTRUCTOR_MAX_CHARS", 4_000)
+            trd = dict(v)
+            q = str(trd.get("question") or "")
+            s = str(trd.get("student_response") or "")
+            a = str(trd.get("answer_key_segment") or "")
+            ic = str(trd.get("instructor_context") or "")
+            trd["question"] = q[:tq] + ("…" if len(q) > tq else "")
+            trd["student_response"] = s[:tr] + ("…" if len(s) > tr else "")
+            trd["answer_key_segment"] = a[:ta] + ("…" if len(a) > ta else "")
+            trd["instructor_context"] = ic[:ti] + ("…" if len(ic) > ti else "")
+            out[k] = trd
         else:
             out[k] = v
     return out

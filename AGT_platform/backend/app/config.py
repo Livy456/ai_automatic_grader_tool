@@ -139,6 +139,10 @@ class Config:
 
     # GPU / private inference (workers only in split prod; never expose Ollama publicly).
     OLLAMA_BASE_URL = _env_str("OLLAMA_BASE_URL")
+    # Name as shown by ``ollama list`` on the host that serves OLLAMA_BASE_URL. Multimodal
+    # grading calls Ollama HTTP only; Meta ``llama-model download`` checkpoints under
+    # ``~/.llama/checkpoints`` are not read until you import or otherwise register the same
+    # weights with Ollama (see backend ReadMe.md, “Ollama vs Meta llama-models”).
     OLLAMA_MODEL = _env_str("OLLAMA_MODEL")
     # Optional override when Ollama is on a different private host than default compose DNS.
     INTERNAL_OLLAMA_URL = _env_str("INTERNAL_OLLAMA_URL").strip() or _env_str(
@@ -184,6 +188,43 @@ class Config:
         0.0,
         min(_env_float("GRADING_SAMPLE_TEMPERATURE", default=0.3), 2.0),
     )
+    # Multimodal chunk grading only: k stochastic chat_json calls per model in
+    # build_multimodal_grading_clients() (Ollama or Hugging Face primary when GRADING_MODEL_2/3 unset).
+    # Separate from GRADING_SAMPLES_PER_MODEL so legacy entropy pipelines are unchanged.
+    MULTIMODAL_SAMPLES_PER_MODEL = max(
+        1,
+        min(_env_int("MULTIMODAL_SAMPLES_PER_MODEL", default=5), 16),
+    )
+    # When true, each chunk is sent to Ollama once to fill ``evidence["trio"]`` (question /
+    # student_response / instructor_context) before answer-key alignment. Uses
+    # ``MULTIMODAL_TRIO_CHUNKING_MODEL`` or ``OLLAMA_MODEL`` (e.g. Llama 4 Maverick FP8).
+    MULTIMODAL_LLM_TRIO_CHUNKING = _env_bool("MULTIMODAL_LLM_TRIO_CHUNKING")
+    MULTIMODAL_TRIO_CHUNKING_MODEL = _env_str("MULTIMODAL_TRIO_CHUNKING_MODEL").strip()
+    # ollama | huggingface | hf | openai — multimodal **grading** and optional structure LLM
+    # (QA segment, trio when OpenAI frontload is off). ``openai`` uses ``OPENAI_MULTIMODAL_GRADING_MODEL``
+    # (default ``gpt-5.4-nano``) via the OpenAI API. When ``MULTIMODAL_LLM_BACKEND`` is unset and
+    # ``OPENAI_API_KEY`` is set, defaults to ``openai``; otherwise ``ollama``.
+    _mm_lb = _env_str("MULTIMODAL_LLM_BACKEND").strip().lower()
+    if _mm_lb:
+        MULTIMODAL_LLM_BACKEND = {"hf": "huggingface"}.get(_mm_lb, _mm_lb)
+    else:
+        MULTIMODAL_LLM_BACKEND = (
+            "openai" if _env_str("OPENAI_API_KEY").strip() else "ollama"
+        )
+    # OpenAI chat model for multimodal per-chunk grading when ``MULTIMODAL_LLM_BACKEND=openai``.
+    OPENAI_MULTIMODAL_GRADING_MODEL = (
+        _env_str("OPENAI_MULTIMODAL_GRADING_MODEL").strip() or "gpt-5.4-nano"
+    )
+    # Hugging Face repo id (gated models need HUGGINGFACE_HUB_TOKEN or HF_TOKEN). Empty →
+    # meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8 when backend is huggingface.
+    HUGGINGFACE_GRADING_MODEL_ID = _env_str("HUGGINGFACE_GRADING_MODEL_ID").strip()
+    HUGGINGFACE_HUB_TOKEN = _env_str("HUGGINGFACE_HUB_TOKEN").strip()
+    HF_TOKEN = _env_str("HF_TOKEN").strip()
+    HUGGINGFACE_MAX_NEW_TOKENS = _env_int("HUGGINGFACE_MAX_NEW_TOKENS", default=2048)
+    HUGGINGFACE_TRUST_REMOTE_CODE = (
+        _env_str("HUGGINGFACE_TRUST_REMOTE_CODE").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
     # fingerprint (MVP) | openai (reserved; falls back to fingerprint) | off (same as fingerprint)
     GRADING_ENTROPY_EMBEDDINGS = (
         _env_str("GRADING_ENTROPY_EMBEDDINGS").strip().lower() or "fingerprint"
@@ -206,7 +247,18 @@ class Config:
         min(_env_int("OLLAMA_CHAT_TIMEOUT_SEC", default=300), 3600),
     )
 
-    # RAG / local embedding export (submission text → vector). Ollama /api/embeddings model name.
+    # RAG / local embedding export (submission text → vector).
+    # RAG_EMBEDDING_BACKEND: sentence_transformers (default) | openai | ollama
+    # — multimodal RAG uses :func:`app.grading.rag_embeddings.compute_submission_embedding`.
+    # ``openai`` uses ``OPENAI_TRIO_RAG_EMBEDDING_MODEL`` (default text-embedding-3-small);
+    # requires OPENAI_API_KEY (falls back to sentence_transformers then hash on failure).
+    _rag_be = _env_str("RAG_EMBEDDING_BACKEND").strip().lower()
+    RAG_EMBEDDING_BACKEND = _rag_be or "sentence_transformers"
+    # Hugging Face id for ``sentence_transformers.SentenceTransformer`` when backend is ST.
+    SENTENCE_TRANSFORMERS_MODEL = (
+        _env_str("SENTENCE_TRANSFORMERS_MODEL").strip() or "all-MiniLM-L6-v2"
+    )
+    # Ollama embed model when ``RAG_EMBEDDING_BACKEND=ollama`` (or ST load fails and order falls back).
     OLLAMA_EMBEDDINGS_MODEL = (
         _env_str("OLLAMA_EMBEDDINGS_MODEL").strip() or "nomic-embed-text"
     )
@@ -216,6 +268,33 @@ class Config:
     RAG_EMBED_ORDER = _env_str("RAG_EMBED_ORDER").strip().lower() or "auto"
     # auto | on | off — auto enables OpenAI notebook digest when OPENAI_API_KEY is set.
     NOTEBOOK_OPENAI_DIGEST = _env_str("NOTEBOOK_OPENAI_DIGEST").strip().lower() or "auto"
+
+    # Multimodal: one OpenAI chat (trio JSON) + OpenAI embeddings for all units, then
+    # local Maverick/Ollama for per-chunk grading only. Requires OPENAI_API_KEY.
+    # Values: off | false — disabled. on | true — forced on (still needs API key).
+    # Empty or ``auto`` (default): on when OPENAI_API_KEY is set (chunk+trio+RAG via OpenAI).
+    MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD = (
+        _env_str("MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD").strip().lower()
+    )
+    OPENAI_TRIO_RAG_CHAT_MODEL = (
+        _env_str("OPENAI_TRIO_RAG_CHAT_MODEL").strip() or "gpt-5.4-nano"
+    )
+    OPENAI_TRIO_RAG_EMBEDDING_MODEL = (
+        _env_str("OPENAI_TRIO_RAG_EMBEDDING_MODEL").strip() or "text-embedding-3-small"
+    )
+    MULTIMODAL_OPENAI_TRIO_INPUT_MAX_CHARS = _env_int(
+        "MULTIMODAL_OPENAI_TRIO_INPUT_MAX_CHARS", default=120_000
+    )
+    # Defaults align with gpt-5.4-nano + text-embedding-3-small list pricing; override if your SKU differs.
+    OPENAI_TRIO_RAG_CHAT_INPUT_USD_PER_MTOK = _env_float(
+        "OPENAI_TRIO_RAG_CHAT_INPUT_USD_PER_MTOK", default=0.20
+    )
+    OPENAI_TRIO_RAG_CHAT_OUTPUT_USD_PER_MTOK = _env_float(
+        "OPENAI_TRIO_RAG_CHAT_OUTPUT_USD_PER_MTOK", default=1.25
+    )
+    OPENAI_TRIO_RAG_EMBED_USD_PER_MTOK = _env_float(
+        "OPENAI_TRIO_RAG_EMBED_USD_PER_MTOK", default=0.02
+    )
 
     WHISPER_ENABLED = _env_bool("WHISPER_ENABLED")
 

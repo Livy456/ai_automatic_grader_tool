@@ -152,11 +152,56 @@ def _classify_markdown(src: str, cell_idx: int) -> str:
     return "student_text"
 
 
+def _split_instructor_prefix_and_student_suffix(src: str) -> tuple[str, str]:
+    """
+    Many assignments wrap instructor scaffolding in ``# DO NOT MODIFY`` blocks and put
+    student work **after** an ``END OF INSTRUCTOR`` (or similar) marker. Without splitting,
+    the whole cell is classified as instructor-only and student code never reaches
+    ``response_parts`` — the grader then sees prompts but no code for evidence.
+    """
+    s = src.strip()
+    if not s:
+        return "", ""
+    low = s.lower()
+    delimiters = (
+        "\n# end of instructor code",
+        "\n# end of instructor",
+        "# end of instructor code",
+        "# end of instructor",
+        "\n# your code below",
+        "\n# your solution",
+        "\n# write your code here",
+        "\n# --- student",
+        "\n# begin student",
+    )
+    best_tail = ""
+    best_cut = -1
+    for d in delimiters:
+        idx = low.rfind(d)
+        if idx < 0:
+            continue
+        cut = idx + len(d)
+        while cut < len(s) and s[cut] in " \t":
+            cut += 1
+        if cut < len(s) and s[cut] == "\n":
+            cut += 1
+        tail = s[cut:].strip()
+        if len(tail) >= 6 and len(tail) > len(best_tail):
+            best_tail = tail
+            best_cut = cut
+    if best_cut < 0:
+        return s, ""
+    return s[:best_cut].strip(), best_tail
+
+
 def _classify_code(src: str) -> str:
     """Return one of: ``student_code``, ``instructor_code``, ``test_code``, ``empty``."""
     stripped = src.strip()
     if not stripped:
         return "empty"
+    _head, tail = _split_instructor_prefix_and_student_suffix(stripped)
+    if tail and len(tail) >= 8:
+        return "student_code"
     if _is_instructor_code(stripped) and _has_student_work_marker(stripped):
         return "student_code"
     if _is_instructor_code(stripped):
@@ -187,6 +232,19 @@ def _new_unit(question_id: str) -> dict[str, Any]:
         "response_parts": [],
         "context_parts": [],
         "has_student_content": False,
+    }
+
+
+def _unit_trio_payload(unit: dict[str, Any]) -> dict[str, str]:
+    """Structured question / student work / (answer key filled later) for RAG + prompts."""
+    q = "\n\n".join(p for p in unit["question_parts"] if p.strip()).strip()
+    r = "\n\n".join(p for p in unit["response_parts"] if p.strip()).strip()
+    ctx = "\n\n".join(p for p in unit.get("context_parts", []) if p.strip()).strip()
+    return {
+        "question": q,
+        "student_response": r,
+        "instructor_context": ctx,
+        "answer_key_segment": "",
     }
 
 
@@ -281,7 +339,19 @@ def build_notebook_qa_chunks(
                 current = _new_unit("preamble")
             current["question_parts"].append(src)
 
-        elif role in ("instructor_code", "test_code"):
+        elif role == "instructor_code":
+            if current is None:
+                current = _new_unit("preamble")
+            inst, stud = _split_instructor_prefix_and_student_suffix(src)
+            if stud.strip():
+                if inst.strip():
+                    current["context_parts"].append(inst.strip())
+                current["response_parts"].append(stud.strip())
+                current["has_student_content"] = True
+            else:
+                current["context_parts"].append(src)
+
+        elif role == "test_code":
             if current is not None:
                 current["context_parts"].append(src)
 
@@ -321,6 +391,7 @@ def build_notebook_qa_chunks(
         extracted = _unit_to_extracted_text(unit)
         if not extracted:
             continue
+        trio = _unit_trio_payload(unit)
         out.append(
             GradingChunk(
                 chunk_id=f"{student_id}:{assignment_id}:{qid}",
@@ -339,6 +410,7 @@ def build_notebook_qa_chunks(
                     "response_preview": "\n\n".join(
                         unit["response_parts"]
                     ).strip()[:500],
+                    "trio": trio,
                 },
             )
         )
