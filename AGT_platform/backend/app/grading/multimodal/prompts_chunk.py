@@ -17,7 +17,7 @@ You are an evidence-based evaluator grading **one question chunk** from a studen
 
 CHAIN-OF-THOUGHT — for **each** rubric criterion, in order:
   Step 1  EXTRACT: Quote or excerpt only what appears in the submission (chunk text / artifacts).
-  Step 2  REASON:  Say what that evidence shows **for this criterion only**. Do not infer unstated student reasoning.
+  Step 2  REASON:  Say what that evidence shows **for this criterion only**. Do not infer unstated student reasoning. If ``reference_answer_key``, ``matched_answer_key_for_question``, or ``trio_reference_answer_for_this_chunk`` is non-empty, briefly compare the student evidence to that reference (match, partial match, or mismatch). Put that comparison in ``reasoning`` / ``justification`` only — never inside ``evidence``.
   Step 3  SCORE:   Assign the **raw rubric level** for this criterion (see RAW SCORE GRID below). It must follow from Steps 1–2.
 
 RAW SCORE GRID — **mandatory; no exceptions**
@@ -34,7 +34,8 @@ RUBRIC FIDELITY:
 - **EXACT NAMES ONLY:** `criterion_scores[].name` MUST match `rubric.rows[].name` **exactly**. No `criterion_1`, no extra criteria.
 - One object per rubric row; same order as `rubric.rows` when possible.
 - Put the raw level in **`raw_score`** (preferred) or **`score`**. Copy `max_points` from the rubric row.
-- Include `evidence`, `reasoning`, `justification` per criterion. **`evidence` must be a verbatim substring** (direct quote) from the student's response in this chunk — not a paraphrase, not a rubric phrase, not a grader summary. Use quotation marks around the excerpt when helpful. Leave empty only if the submission is truly blank for that criterion.
+- Include `evidence`, `reasoning`, `justification` per criterion. **`evidence` must be a verbatim substring** (direct quote) from the student's response in this chunk — not a paraphrase, not a rubric phrase, not a grader summary, **not** text copied only from the answer key. Use quotation marks around the excerpt when helpful. Leave empty only if the submission is truly blank for that criterion.
+- **`reasoning` and `justification`** should tie scores to both the rubric and (when provided) the answer-key fields above, while keeping ``evidence`` student-only.
 - Also output `criterion_justifications` (one string per criterion, same order).
 - Optional `total_score` / `normalized_score`: the **server recomputes** the official score from your raw levels; do not trust self-computed linear ratios.
 - `review_flag`: true only if evidence is genuinely ambiguous or the chunk is too short to grade.
@@ -83,7 +84,7 @@ OUTPUT_SCHEMA_HINT = {
             "raw_score": "number — raw rubric level on 0..max_points in steps of 0.5 only (alias: score)",
             "max_points": "number — max ordinal R, copied from rubric",
             "evidence": "REQUIRED string — verbatim quote from the student's text in this chunk (substring of their answer)",
-            "reasoning": "REQUIRED string — evidence-grounded; no invented student intent",
+            "reasoning": "REQUIRED string — evidence-grounded; when an answer key is in the payload, say how the student lines up with it (comparison belongs here, not in evidence)",
             "justification": "string — short summary tied to evidence",
         }
     ],
@@ -175,6 +176,15 @@ def build_chunk_grading_prompt(
             "\nA matched dataset preview is provided under matched_dataset_preview. "
             "Use it only as factual context for interpreting the student’s outputs; "
             "it is not part of the student’s submission."
+        )
+    if ak or matched_ak or trio_ak:
+        instr_parts.append(
+            "\nAnswer-key grounding: for **each** criterion, both **reasoning** and "
+            "**justification** must explicitly relate the student’s evidence to the "
+            "reference material in this payload (``reference_answer_key``, "
+            "``matched_answer_key_for_question``, and/or ``trio_reference_answer_for_this_chunk``), "
+            "e.g. where the submission agrees or diverges. Do not leave the reference unused "
+            "when it applies to that criterion."
         )
     payload: dict[str, Any] = {
         "instructions": "".join(instr_parts),

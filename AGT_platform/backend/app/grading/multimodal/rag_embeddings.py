@@ -499,11 +499,14 @@ def build_multimodal_grading_chunks(
 
     ipynb_bytes = _get_ipynb_bytes(envelope)
     if ipynb_bytes is not None:
+        nb_mod = modality_from_hints(hints)
+        if nb_mod == Modality.UNKNOWN:
+            nb_mod = Modality.NOTEBOOK
         nb_chunks = build_notebook_qa_chunks(
             ipynb_bytes,
             assignment_id=envelope.assignment_id,
             student_id=envelope.student_id,
-            modality=modality_from_hints(hints),
+            modality=nb_mod,
             task_type=task_type_from_hints(hints),
             max_grading_units=max_units,
         )

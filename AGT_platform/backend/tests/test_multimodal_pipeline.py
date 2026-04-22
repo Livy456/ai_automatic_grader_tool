@@ -67,7 +67,7 @@ from app.grading.multimodal.schemas import (
     SampledChunkGrade,
 )
 from app.grading.multimodal.model_runner import MockChunkModelRunner
-from app.grading.multimodal.rubric_router import route_rubric
+from app.grading.multimodal.rubric_router import RubricRouteResult, route_rubric
 from app.grading.multimodal.entropy import semantic_entropy_from_cluster_counts
 from app.grading.multimodal.parser import parse_chunk_grade_json
 from app.grading.multimodal.answer_key_chunk_enrich import (
@@ -711,18 +711,34 @@ _FREE_RESPONSE_RUBRIC = [
      "max_score": 1, "description": "Clear and well-organized."},
 ]
 
+_SCAFFOLDED_RUBRIC = [
+    {"name": "Functional Correctness", "max_points": 4, "criterion": "Functional Correctness",
+     "max_score": 4, "description": "Output correctness."},
+    {"name": "Logical Implementation", "max_points": 3, "criterion": "Logical Implementation",
+     "max_score": 3, "description": "Algorithm fit."},
+    {"name": "Code Quality", "max_points": 2, "criterion": "Code Quality",
+     "max_score": 2, "description": "Readability."},
+    {"name": "Edge Case Awareness", "max_points": 1, "criterion": "Edge Case Awareness",
+     "max_score": 1, "description": "Robustness."},
+]
+
+_EDA_RUBRIC_STUB = [
+    {"name": "Problem Framing", "max_points": 3, "criterion": "Problem Framing",
+     "max_score": 3, "description": "Scope."},
+]
+
 
 def _make_sample_json(norm: float, *, confidence_note: str = "") -> str:
     criteria = [
-        {"name": "Conceptual Correctness", "score": round(norm * 4), "max_points": 4},
-        {"name": "Evidence & Justification", "score": round(norm * 3), "max_points": 3},
-        {"name": "Depth of Understanding", "score": round(norm * 2), "max_points": 2},
-        {"name": "Clarity", "score": round(norm * 1), "max_points": 1},
+        {"name": "Functional Correctness", "score": round(norm * 4), "max_points": 4},
+        {"name": "Logical Implementation", "score": round(norm * 3), "max_points": 3},
+        {"name": "Code Quality", "score": round(norm * 2), "max_points": 2},
+        {"name": "Edge Case Awareness", "score": round(norm * 1), "max_points": 1},
     ]
     total = sum(c["score"] for c in criteria)
     max_total = sum(c["max_points"] for c in criteria)
     return json.dumps({
-        "rubric_type": "free_response",
+        "rubric_type": "programming_scaffolded",
         "criterion_scores": criteria,
         "criterion_justifications": [
             f"Score {c['score']}/{c['max_points']} — evidence for {c['name']}."
@@ -769,6 +785,90 @@ class MultimodalRoutingTests(unittest.TestCase):
         route_rubric(ch, rubric_rows_by_type={})
         self.assertEqual(ch.rubric_type, RubricType.PROGRAMMING_SCAFFOLDED)
 
+    def test_ipynb_chunk_free_response_task_never_gets_free_response_rubric(self) -> None:
+        rows = {
+            RubricType.PROGRAMMING_SCAFFOLDED: _SCAFFOLDED_RUBRIC,
+            RubricType.EDA_VISUALIZATION: _EDA_RUBRIC_STUB,
+            RubricType.FREE_RESPONSE: _FREE_RESPONSE_RUBRIC,
+        }
+        ch = GradingChunk(
+            chunk_id="c1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=Modality.NOTEBOOK,
+            task_type=TaskType.FREE_RESPONSE_SHORT,
+            extracted_text="# 1.1\nimport csv\n",
+            evidence={"chunker": "notebook_cell_order"},
+        )
+        route_rubric(ch, rubric_rows_by_type=rows)
+        self.assertIn(
+            ch.rubric_type,
+            (RubricType.PROGRAMMING_SCAFFOLDED, RubricType.EDA_VISUALIZATION),
+        )
+        self.assertNotEqual(ch.rubric_type, RubricType.FREE_RESPONSE)
+
+    def test_ipynb_chunk_unknown_task_defaults_to_scaffolded_or_eda(self) -> None:
+        rows = {
+            RubricType.PROGRAMMING_SCAFFOLDED: _SCAFFOLDED_RUBRIC,
+            RubricType.EDA_VISUALIZATION: _EDA_RUBRIC_STUB,
+        }
+        ch = GradingChunk(
+            chunk_id="c1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=Modality.NOTEBOOK,
+            task_type=TaskType.UNKNOWN,
+            extracted_text="import csv\n",
+            evidence={"chunker": "notebook_cell_order"},
+        )
+        route_rubric(ch, rubric_rows_by_type=rows)
+        self.assertEqual(ch.rubric_type, RubricType.PROGRAMMING_SCAFFOLDED)
+
+    def test_ipynb_chunk_with_plt_routes_to_open_ended_eda_rubric(self) -> None:
+        rows = {
+            RubricType.PROGRAMMING_SCAFFOLDED: _SCAFFOLDED_RUBRIC,
+            RubricType.EDA_VISUALIZATION: _EDA_RUBRIC_STUB,
+        }
+        ch = GradingChunk(
+            chunk_id="c1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=Modality.NOTEBOOK,
+            task_type=TaskType.UNKNOWN,
+            extracted_text="import matplotlib.pyplot as plt\nplt.scatter(x, y)\n",
+            evidence={"chunker": "notebook_cell_order"},
+        )
+        route_rubric(ch, rubric_rows_by_type=rows)
+        self.assertEqual(ch.rubric_type, RubricType.EDA_VISUALIZATION)
+
+    def test_classifier_free_response_overridden_for_trio_frontload_chunk(self) -> None:
+        rows = {
+            RubricType.PROGRAMMING_SCAFFOLDED: _SCAFFOLDED_RUBRIC,
+            RubricType.EDA_VISUALIZATION: _EDA_RUBRIC_STUB,
+            RubricType.FREE_RESPONSE: _FREE_RESPONSE_RUBRIC,
+        }
+
+        def bad_classifier(_ch: GradingChunk) -> RubricRouteResult:
+            return RubricRouteResult(
+                RubricType.FREE_RESPONSE, "classifier_says_prose", True
+            )
+
+        ch = GradingChunk(
+            chunk_id="c1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=Modality.UNKNOWN,
+            task_type=TaskType.UNKNOWN,
+            extracted_text="import csv\n",
+            evidence={"_openai_trio_rag_frontload": True},
+        )
+        route_rubric(ch, classifier=bad_classifier, rubric_rows_by_type=rows)
+        self.assertNotEqual(ch.rubric_type, RubricType.FREE_RESPONSE)
+
     def test_semantic_entropy_two_clusters(self) -> None:
         h = semantic_entropy_from_cluster_counts({"A": 1, "B": 1})
         self.assertGreater(h, 0.0)
@@ -783,7 +883,7 @@ class MultimodalPipelineRunTests(unittest.TestCase):
             plaintext=_SAMPLE_PLAINTEXT,
             modality_hints={
                 "modality": "notebook",
-                "task_type": "free_response_short",
+                "task_type": "scaffolded_coding",
                 "answer_key_plaintext": "Sample reference: cite evidence from the notebook.",
             },
         )
@@ -796,7 +896,13 @@ class MultimodalPipelineRunTests(unittest.TestCase):
             _make_sample_json(0.75, confidence_note="References reading."),
         ])
         pipe = MultimodalGradingPipeline(
-            cfg, runner, rubric_rows_by_type={RubricType.FREE_RESPONSE: _FREE_RESPONSE_RUBRIC},
+            cfg,
+            runner,
+            rubric_rows_by_type={
+                RubricType.PROGRAMMING_SCAFFOLDED: _SCAFFOLDED_RUBRIC,
+                RubricType.EDA_VISUALIZATION: _EDA_RUBRIC_STUB,
+                RubricType.FREE_RESPONSE: _FREE_RESPONSE_RUBRIC,
+            },
         )
         art = PipelineArtifactStore()
         result = pipe.run(env, artifacts=art)
@@ -820,7 +926,7 @@ class MultimodalPipelineRunTests(unittest.TestCase):
     def test_assignment_overall_score_is_mean_of_question_overall_scores(self) -> None:
         result, _ = self._run_pipeline()
         grading_dict = multimodal_assignment_to_grading_dict(
-            result, rubric=_FREE_RESPONSE_RUBRIC
+            result, rubric=_SCAFFOLDED_RUBRIC
         )
         qg = grading_dict.get("question_grades") or []
         self.assertTrue(qg)
@@ -858,6 +964,7 @@ class MultimodalPipelineRunTests(unittest.TestCase):
         data = json.loads(raw)
         self.assertIn("reference_answer_key", data)
         self.assertIn("Sample:", data["reference_answer_key"])
+        self.assertIn("Answer-key grounding", data["instructions"])
         self.assertIn("matched_dataset_preview", data)
         self.assertIn("col1", data["matched_dataset_preview"])
 
