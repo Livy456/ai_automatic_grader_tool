@@ -1,5 +1,5 @@
 """
-RAG-style chunk embeddings and optional Ollama Q→A segmentation for multimodal grading.
+RAG-style chunk embeddings and optional LLM Q→A segmentation for multimodal grading.
 
 Aligns with :mod:`app.grading.rag_embeddings` — per-chunk vectors from
 :func:`app.grading.rag_embeddings.compute_submission_embedding` (default
@@ -7,16 +7,27 @@ Aligns with :mod:`app.grading.rag_embeddings` — per-chunk vectors from
 
 **Chunking stack** (see ``new_chunking_method.md``):
 
-1. Raw **ipynb** bytes — when ``modality_hints["blank_assignment_ipynb_bytes"]`` resolves and
-   ``MULTIMODAL_BLANK_TEMPLATE_CHUNKING`` is not ``off``, try LLM question inventory
+0. When ``MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING`` is ``auto`` or ``on`` and
+   ``ANTHROPIC_API_KEY`` is set, :mod:`claude_structured_assignment_chunker` may emit
+   ``GradingChunk`` rows from a single Claude JSON ``units`` response (skipping steps 1–3
+   on success). Default env is ``off``.
+1. When ``MULTIMODAL_LLM_TRIPLET_THREE_SOURCE=on`` and blank template + answer key resolve,
+   :mod:`llm_triplet_three_source` may emit trios in one LLM call (before notebook template
+   heuristics). Blank may be ``.ipynb`` or other supported template types; student text comes
+   from all submission artifacts. Else when ``modality_hints["blank_assignment_template_bytes"]``
+   or ``blank_assignment_ipynb_bytes`` resolves and ``MULTIMODAL_BLANK_TEMPLATE_CHUNKING`` is not
+   ``off``, try LLM question inventory
    (:mod:`blank_llm_question_chunker`) then heuristic blank/student alignment
    (:mod:`template_aligned_notebook_chunks`); otherwise
    :func:`notebook_chunker.build_notebook_qa_chunks` (cell-order Q/A).
 2. Otherwise **PDF plaintext** is reflowed via
    :func:`app.grading.submission_chunks.reflow_pdf_sections_in_plaintext` before any LLM
    segmentation so verticalized extractors do not confuse the model.
-3. If ``MULTIMODAL_OLLAMA_QA_SEGMENT`` is on, the **structure LLM** (Ollama or Hugging Face
-   per ``MULTIMODAL_LLM_BACKEND``) returns JSON Q/A units; on failure,
+3. If ``MULTIMODAL_ASSIGNMENT_PARSING`` or ``MULTIMODAL_OLLAMA_QA_SEGMENT`` (or
+   ``MULTIMODAL_LLM_QA_SEGMENT``) is on, an **LLM** returns JSON Q/A units. **Claude** runs when
+   ``ANTHROPIC_API_KEY`` is set and ``MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING`` is not ``off``
+   (default ``auto``); otherwise **OpenAI** is used for this step if ``OPENAI_API_KEY`` is set.
+   Ollama is not used. On failure,
    :func:`chunker.default_chunker_build_units` runs structured chunking
    (:func:`app.grading.submission_chunks.build_submission_chunks`, which reflows each PDF
    section again and applies journal-style prompt boundaries when hints match).
@@ -26,9 +37,13 @@ Aligns with :mod:`app.grading.rag_embeddings` — per-chunk vectors from
    replaces steps 3–4 for
    that run (one or more OpenAI chats on overlapping windows when the submission is long,
    plus OpenAI Embeddings API). Otherwise, if
-   ``MULTIMODAL_LLM_TRIO_CHUNKING`` is on, :func:`refine_chunks_trio_with_ollama` runs after
-   units exist to label ``question`` / ``student_response`` / ``instructor_context`` via the
-   structure client (answer-key snippet alignment still uses answer-key enrich).
+   ``MULTIMODAL_LLM_TRIO_CHUNKING`` is on, :func:`refine_chunks_trio_with_structure_llm` runs after
+   units exist to label ``question`` / ``student_response`` / ``instructor_context`` via Claude
+   or OpenAI (answer-key snippet alignment still uses answer-key enrich).
+
+**Prompt (assignment parsing):** the system message sent to the LLM for step 3 is the string
+``ASSIGNMENT_PARSING_SYSTEM_PROMPT`` (module constant below). The user message is the submission
+plain text (artifact-derived when available, then reflowed).
 """
 
 from __future__ import annotations
@@ -38,14 +53,10 @@ import os
 from typing import Any
 
 from app.config import Config
+from app.grading.artifact_plaintext import artifacts_to_concatenated_plain
 from app.grading.llm_router import (
-    OllamaClient,
     OpenAIJsonClient,
-    _ollama_keep_alive,
-    huggingface_grading_model_id,
-    huggingface_json_client_from_config,
-    multimodal_llm_backend_uses_huggingface,
-    multimodal_llm_backend_uses_openai,
+    anthropic_multimodal_structure_client,
     openai_multimodal_grading_model,
 )
 from app.grading.rag_embeddings import compute_submission_embedding
@@ -61,6 +72,18 @@ from .template_aligned_notebook_chunks import try_build_blank_template_aligned_c
 _log = logging.getLogger(__name__)
 
 
+# System message for LLM assignment parsing (step 3). Sent as the chat ``system`` role; the user
+# role is the full submission plaintext (see ``_qa_segment_plaintext``).
+ASSIGNMENT_PARSING_SYSTEM_PROMPT = """You are an expert software engineer who specializes in parsing artifacts.
+Your task is to parse this student assignment into distinct sections: each section corresponds to a different question, exercise, coding problem, or instruction the students were asked to complete.
+For each section, capture the instructor-facing prompt (the question or directions) separately from the student's answer, code, data visualization, image,tables, or free-text response that fulfills that prompt.
+Preserve ordering as it appears in the submission. Do not invent prompts or answers that are not present in the text.
+Return **only** valid JSON with this shape (no markdown fences, no commentary outside the JSON object):
+{"units":[{"key":"string_id","question":"prompt or problem text","response":"student answer or code"}]}
+Use short unique keys like q1, q2, p1a. If the submission is one continuous block, emit a single unit with key q1.
+The "question" field is the instructor prompt for that item; the "response" field is exactly what the student supplied for that prompt (use an empty string if there is no separable answer)."""
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name, "").strip().lower()
     if not raw:
@@ -69,7 +92,18 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def multimodal_ollama_qa_segment_enabled() -> bool:
-    return _env_bool("MULTIMODAL_OLLAMA_QA_SEGMENT", default=False)
+    """
+    True to run LLM JSON Q/A segmentation on plain submissions.
+
+    Enable with ``MULTIMODAL_ASSIGNMENT_PARSING=on`` (preferred), ``MULTIMODAL_LLM_QA_SEGMENT=on``,
+    or the legacy name ``MULTIMODAL_OLLAMA_QA_SEGMENT=on`` (the backend may use Claude when
+    ``ANTHROPIC_API_KEY`` is set — see :data:`ASSIGNMENT_PARSING_SYSTEM_PROMPT`).
+    """
+    return (
+        _env_bool("MULTIMODAL_ASSIGNMENT_PARSING", default=False)
+        or _env_bool("MULTIMODAL_LLM_QA_SEGMENT", default=False)
+        or _env_bool("MULTIMODAL_OLLAMA_QA_SEGMENT", default=False)
+    )
 
 
 def multimodal_rag_embed_units_enabled() -> bool:
@@ -77,133 +111,83 @@ def multimodal_rag_embed_units_enabled() -> bool:
 
 
 def multimodal_llm_trio_chunking_enabled(cfg: Config | None = None) -> bool:
-    """True when Ollama should re-label each chunk's ``evidence['trio']`` before AK enrich."""
+    """True when an LLM should re-label each chunk's ``evidence['trio']`` before AK enrich."""
     if cfg is not None and bool(getattr(cfg, "MULTIMODAL_LLM_TRIO_CHUNKING", False)):
         return True
     return _env_bool("MULTIMODAL_LLM_TRIO_CHUNKING", default=False)
 
 
-def _multimodal_structure_llm_model(cfg: Config) -> str:
+def _multimodal_structure_chat_client(
+    cfg: Config, *, purpose: str = "trio"
+) -> tuple[Any, str]:
     """
-    Ollama model for (a) optional PDF/plain Q→A JSON segmentation and (b) optional trio LLM chunking.
+    Client for multimodal **structure** only (assignment parsing, trio refinement, blank LLM).
 
-    Precedence: ``MULTIMODAL_TRIO_CHUNKING_MODEL`` → ``OLLAMA_MODEL`` →
-    ``MULTIMODAL_QA_SEGMENT_MODEL`` (env) → ``llama3.2:1b``.
+    Uses **Claude** when :func:`app.grading.llm_router.anthropic_multimodal_structure_client`
+    returns a client; otherwise **OpenAI** when ``OPENAI_API_KEY`` is set. Ollama is never used
+    in this pipeline. ``purpose`` is kept for call-site compatibility and is ignored.
     """
-    m = (getattr(cfg, "MULTIMODAL_TRIO_CHUNKING_MODEL", "") or "").strip()
-    if m:
-        return m
-    om = (getattr(cfg, "OLLAMA_MODEL", "") or "").strip()
-    if om:
-        return om
-    q = os.getenv("MULTIMODAL_QA_SEGMENT_MODEL", "").strip()
-    if q:
-        return q
-    return "llama3.2:1b"
-
-
-def _qa_segment_model(cfg: Config) -> str:
-    return _multimodal_structure_llm_model(cfg)
-
-
-def _ollama_base(cfg: Config) -> str:
-    return (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
-
-
-def _multimodal_structure_chat_client(cfg: Config, *, purpose: str = "trio"):
-    """
-    Return (client, model_label) for optional QA segmentation and trio chunking.
-
-    When ``MULTIMODAL_LLM_BACKEND`` is ``huggingface`` / ``hf``, uses local transformers
-    (:func:`~app.grading.llm_router.huggingface_json_client_from_config`). When it is
-    ``openai``, uses :class:`~app.grading.llm_router.OpenAIJsonClient`` (requires
-    ``OPENAI_API_KEY``). Otherwise uses Ollama (requires ``OLLAMA_BASE_URL``).
-
-    ``purpose`` selects HTTP read timeout for Ollama only: ``"qa"`` (segmentation) vs
-    ``"trio"`` (chunk relabeling).
-    """
-    if multimodal_llm_backend_uses_huggingface(cfg):
-        try:
-            mid = huggingface_grading_model_id(cfg)
-            return huggingface_json_client_from_config(cfg, mid), mid
-        except Exception:
-            _log.warning(
-                "Could not build Hugging Face structure LLM client; trio/QA segment skipped.",
-                exc_info=True,
-            )
-            return None, ""
-    if multimodal_llm_backend_uses_openai(cfg):
-        key = (cfg.OPENAI_API_KEY or "").strip()
-        if not key:
-            _log.warning(
-                "MULTIMODAL_LLM_BACKEND=openai but OPENAI_API_KEY is empty; "
-                "structure QA/trio client unavailable."
-            )
-            return None, ""
-        mid = openai_multimodal_grading_model(cfg)
-        return OpenAIJsonClient(key, mid), f"openai:{mid}"
-    base = _ollama_base(cfg)
-    if not base:
+    del purpose
+    anth = anthropic_multimodal_structure_client(cfg)
+    if anth is not None:
+        return anth
+    key = (getattr(cfg, "OPENAI_API_KEY", "") or "").strip()
+    if not key:
+        _log.warning(
+            "_multimodal_structure_chat_client: no ANTHROPIC_API_KEY and no OPENAI_API_KEY; "
+            "structure QA/trio calls are disabled."
+        )
         return None, ""
-    model = _multimodal_structure_llm_model(cfg)
-    if purpose == "qa":
-        tout = _qa_segment_http_timeout_sec(cfg)
-    else:
-        try:
-            tout = float(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 300))
-            tout = min(1800.0, max(60.0, tout))
-        except (TypeError, ValueError):
-            tout = 300.0
-    client = OllamaClient(
-        base,
-        model,
-        request_json_format=getattr(cfg, "OLLAMA_CHAT_JSON_FORMAT", True),
-        timeout_sec=tout,
-        keep_alive=_ollama_keep_alive(cfg),
-    )
-    return client, model
+    mid = openai_multimodal_grading_model(cfg)
+    return OpenAIJsonClient(key, mid), f"openai:{mid}"
 
 
-def _chat_timeout(cfg: Config) -> float:
-    return float(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 120))
-
-
-def _qa_segment_http_timeout_sec(cfg: Config) -> float:
-    """HTTP read timeout for Ollama QA segmentation (same order of magnitude as grading)."""
-    raw = float(_chat_timeout(cfg))
-    return min(1200.0, max(45.0, raw))
-
-
-_QA_SYSTEM = """You are a teaching assistant. Split the student's assignment text into separate gradable units.
-Each unit is one question, exercise, or coding problem and the student's answer/response/code that belongs to it.
-Return **only** valid JSON with this shape (no markdown):
-{"units":[{"key":"string_id","question":"prompt or problem text","response":"student answer or code"}]}
-Use short unique keys like q1, q2, p1a. If there is only one blob of text, use one unit with key q1.
-The "question" field is the instructor prompt; "response" is what the student wrote for that prompt."""
+def _qa_segment_plaintext(envelope: IngestionEnvelope) -> str:
+    """Prefer decoded artifact text, then ``extracted_plaintext``; reflow PDF-style blocks."""
+    art_plain = ""
+    arts = envelope.artifacts or {}
+    if isinstance(arts, dict):
+        blob = artifacts_to_concatenated_plain(
+            {
+                k: bytes(v)
+                for k, v in arts.items()
+                if isinstance(v, (bytes, bytearray)) and v
+            }
+        )
+        if blob.strip():
+            art_plain = blob.strip()
+    base = art_plain or (envelope.extracted_plaintext or "").strip()
+    if not base:
+        return ""
+    return reflow_pdf_sections_in_plaintext(base)
 
 
 def _chunks_from_ollama_qa_segmentation(
     envelope: IngestionEnvelope,
     cfg: Config,
 ) -> list[GradingChunk] | None:
-    plain = reflow_pdf_sections_in_plaintext((envelope.extracted_plaintext or "").strip())
+    plain = _qa_segment_plaintext(envelope)
     if not plain:
         return None
-    client, model = _multimodal_structure_chat_client(cfg, purpose="qa")
+    picked = _multimodal_structure_chat_client(cfg, purpose="qa")
+    client, model_label = picked
     if client is None:
         return None
-    # Full submission text so Q/A segmentation sees the entire document (model context limits may still apply).
     user = plain
     try:
         obj = client.chat_json(
             [
-                {"role": "system", "content": _QA_SYSTEM},
+                {"role": "system", "content": ASSIGNMENT_PARSING_SYSTEM_PROMPT},
                 {"role": "user", "content": user},
             ],
             temperature=0.1,
         )
     except Exception:
-        _log.warning("Ollama QA segmentation failed; using heuristic chunker.", exc_info=True)
+        _log.warning(
+            "LLM QA segmentation failed (%s); using heuristic chunker.",
+            model_label,
+            exc_info=True,
+        )
         return None
 
     units = obj.get("units")
@@ -213,6 +197,10 @@ def _chunks_from_ollama_qa_segmentation(
     hints = envelope.modality_hints or {}
     modality = modality_from_hints(hints)
     task = task_type_from_hints(hints)
+    if model_label.startswith("anthropic:"):
+        chunker_tag = "anthropic_qa_segment"
+    else:
+        chunker_tag = "openai_qa_segment"
     out: list[GradingChunk] = []
     for i, u in enumerate(units, start=1):
         if not isinstance(u, dict):
@@ -237,7 +225,9 @@ def _chunks_from_ollama_qa_segmentation(
                     "qa_pair_key": key,
                     "question_text": q,
                     "response_text": r,
-                    "chunker": "ollama_qa_segment",
+                    "chunker": chunker_tag,
+                    "qa_segment_model": model_label,
+                    "assignment_parsing_system_prompt": "ASSIGNMENT_PARSING_SYSTEM_PROMPT",
                     "canonical_pair_index": i,
                     "trio": {
                         "question": q,
@@ -301,10 +291,13 @@ def enrich_chunks_with_rag_embeddings(chunks: list[GradingChunk], cfg: Config) -
         return
     if _chunks_use_openai_trio_rag_frontload(chunks):
         return
-    q_cap = _env_int("MULTIMODAL_TRIO_EMBED_QUESTION_MAX_CHARS", 12_000)
-    r_cap = _env_int("MULTIMODAL_TRIO_EMBED_RESPONSE_MAX_CHARS", 16_000)
-    ak_cap = _env_int("MULTIMODAL_TRIO_EMBED_ANSWER_KEY_MAX_CHARS", 16_000)
-    canon_cap = _env_int("MULTIMODAL_TRIO_CANONICAL_EMBED_MAX_CHARS", 24_000)
+    if _env_bool("MULTIMODAL_TRIO_EMBED_NO_CAPS", default=False):
+        q_cap = r_cap = ak_cap = canon_cap = 10**9
+    else:
+        q_cap = _env_int("MULTIMODAL_TRIO_EMBED_QUESTION_MAX_CHARS", 12_000)
+        r_cap = _env_int("MULTIMODAL_TRIO_EMBED_RESPONSE_MAX_CHARS", 16_000)
+        ak_cap = _env_int("MULTIMODAL_TRIO_EMBED_ANSWER_KEY_MAX_CHARS", 16_000)
+        canon_cap = _env_int("MULTIMODAL_TRIO_CANONICAL_EMBED_MAX_CHARS", 24_000)
 
     for ch in chunks:
         ev = dict(ch.evidence or {})
@@ -401,22 +394,24 @@ Rules:
 - Use empty strings for fields that do not apply."""
 
 
-def refine_chunks_trio_with_ollama(chunks: list[GradingChunk], cfg: Config) -> None:
+def refine_chunks_trio_with_structure_llm(chunks: list[GradingChunk], cfg: Config) -> None:
     """
-    For each chunk, call Ollama once to populate ``evidence["trio"]`` (question /
-    student_response / instructor_context). ``answer_key_segment`` is left unchanged here
-    and is filled by :func:`answer_key_chunk_enrich.enrich_chunks_with_per_question_answer_key`.
+    For each chunk, call the **structure** LLM (Claude preferred, else OpenAI) once to populate
+    ``evidence["trio"]`` (question / student_response / instructor_context). ``answer_key_segment``
+    is left unchanged here and is filled by
+    :func:`answer_key_chunk_enrich.enrich_chunks_with_per_question_answer_key`.
 
     Controlled by ``MULTIMODAL_LLM_TRIO_CHUNKING`` / ``cfg.MULTIMODAL_LLM_TRIO_CHUNKING`` and
-    the structure LLM from :func:`_multimodal_structure_chat_client` (Ollama or Hugging Face).
+    :func:`_multimodal_structure_chat_client` (Ollama is not used).
     """
     if not chunks or not multimodal_llm_trio_chunking_enabled(cfg):
         return
-    client, model = _multimodal_structure_chat_client(cfg, purpose="trio")
+    picked = _multimodal_structure_chat_client(cfg, purpose="trio")
+    client, model = picked
     if client is None:
         _log.warning(
-            "refine_chunks_trio_with_ollama: no structure LLM client "
-            "(set Ollama URL or MULTIMODAL_LLM_BACKEND=huggingface with HF token)"
+            "refine_chunks_trio_with_structure_llm: no structure LLM client "
+            "(set ANTHROPIC_API_KEY for Claude or OPENAI_API_KEY for OpenAI structure fallback)"
         )
         return
     try:
@@ -427,6 +422,10 @@ def refine_chunks_trio_with_ollama(chunks: list[GradingChunk], cfg: Config) -> N
     for ch in chunks:
         ev0 = ch.evidence or {}
         if ev0.get("trio_llm_refined"):
+            continue
+        if ev0.get("_llm_triplet_three_source"):
+            continue
+        if ev0.get("_claude_structured_units"):
             continue
         raw_in = (ch.extracted_text or "").strip()
         if not raw_in:
@@ -472,6 +471,11 @@ def refine_chunks_trio_with_ollama(chunks: list[GradingChunk], cfg: Config) -> N
         ch.evidence = ev
 
 
+def refine_chunks_trio_with_ollama(chunks: list[GradingChunk], cfg: Config) -> None:
+    """Backward-compatible alias for :func:`refine_chunks_trio_with_structure_llm`."""
+    refine_chunks_trio_with_structure_llm(chunks, cfg)
+
+
 def build_multimodal_grading_chunks(
     envelope: IngestionEnvelope,
     cfg: Config | None = None,
@@ -479,19 +483,27 @@ def build_multimodal_grading_chunks(
     """
     Build grading units using the best available chunker:
 
+    0. **Claude structured assignment chunking** (optional) — when
+       ``MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING`` is ``auto`` or ``on`` and
+       ``ANTHROPIC_API_KEY`` is set, a single Claude call returns JSON ``units`` mapped to
+       :class:`GradingChunk` with ``evidence["trio"]`` (see ``claude_structured_assignment_chunker``).
+       On success, notebook cell-order, triplet-three-source, and legacy QA-segment chunkers are skipped.
+       When ``on`` and Claude fails, only :func:`chunker.default_chunker_build_units` is used next.
     1. **Notebook cell-order** — if the envelope carries raw ipynb bytes,
        parse cells directly and pair each question heading with the student's
        response cells (preserves the natural cell ordering).  Does not require
        ``cfg`` — works on the raw notebook JSON alone.
-    2. **Ollama QA segmentation** — LLM-based JSON segmentation (requires
-       ``cfg``; skipped when ``cfg`` is ``None``).  Plaintext is PDF-reflowed first.
+    2. **LLM QA segmentation** — JSON Q/A units (requires ``cfg``; skipped when ``cfg`` is ``None``).
+       **Claude** when ``ANTHROPIC_API_KEY`` is set and parsing is not ``off``; otherwise **OpenAI**
+       for this step if ``OPENAI_API_KEY`` is set. Uses ``ASSIGNMENT_PARSING_SYSTEM_PROMPT``.
+       Plaintext is PDF-reflowed first; artifact bytes are preferred over ``extracted_plaintext``.
     3. **Structured heuristic** — :func:`chunker.default_chunker_build_units` on plaintext
        (PDF reflow + ``build_submission_chunks`` / journal-style boundaries per
        ``new_chunking_method.md``).
 
     ``cfg`` may be ``None`` when the pipeline runs without a full application
     config (e.g. unit tests with a mock runner).  The notebook and heuristic
-    chunkers operate without it; only Ollama QA segmentation is skipped.
+    chunkers operate without it; only LLM QA segmentation is skipped.
     """
     hints = envelope.modality_hints or {}
     cap = hints.get("max_grading_units")
@@ -502,9 +514,53 @@ def build_multimodal_grading_chunks(
         except (TypeError, ValueError):
             pass
 
+    if cfg is not None:
+        from .claude_structured_assignment_chunker import (
+            claude_structured_chunking_forced_on,
+            claude_structured_chunking_should_attempt,
+            try_build_claude_structured_assignment_chunks,
+        )
+
+        if claude_structured_chunking_should_attempt(cfg):
+            cl_chunks = try_build_claude_structured_assignment_chunks(
+                envelope, cfg, max_units=max_units
+            )
+            if cl_chunks:
+                return cl_chunks, "claude_structured_assignment"
+            if claude_structured_chunking_forced_on(cfg):
+                hc = default_chunker_build_units(envelope)
+                return hc, "structured_heuristic_after_claude_fail"
+
+    if cfg is not None:
+        from .llm_triplet_three_source import (
+            multimodal_llm_triplet_three_source_enabled,
+            try_build_llm_triplet_three_source_chunks,
+        )
+
+        if multimodal_llm_triplet_three_source_enabled(cfg):
+            hints0 = envelope.modality_hints or {}
+            ak0 = str(hints0.get("answer_key_plaintext") or "").strip()
+            raw_tpl = hints0.get("blank_assignment_template_bytes")
+            raw_nb = hints0.get("blank_assignment_ipynb_bytes")
+            blank_b = (
+                bytes(raw_tpl) if isinstance(raw_tpl, (bytes, bytearray)) else b""
+            )
+            if not blank_b.strip():
+                blank_b = (
+                    bytes(raw_nb) if isinstance(raw_nb, (bytes, bytearray)) else b""
+                )
+            if ak0 and blank_b.strip():
+                trip0 = try_build_llm_triplet_three_source_chunks(
+                    envelope, cfg, answer_key_plaintext=ak0
+                )
+                if trip0:
+                    return trip0
+
     ipynb_bytes = _get_ipynb_bytes(envelope)
     if ipynb_bytes is not None:
-        tpl = try_build_blank_template_aligned_chunks(envelope, cfg)
+        tpl = None
+        if cfg is not None:
+            tpl = try_build_blank_template_aligned_chunks(envelope, cfg)
         if tpl:
             return tpl
         nb_mod = modality_from_hints(hints)
@@ -523,10 +579,11 @@ def build_multimodal_grading_chunks(
         _log.info("Notebook chunker returned empty; trying other chunkers.")
 
     if cfg is not None and multimodal_ollama_qa_segment_enabled():
-        ollama_units = _chunks_from_ollama_qa_segmentation(envelope, cfg)
-        if ollama_units:
-            return ollama_units, "ollama_qa_segment"
-        _log.info("Ollama QA segmentation disabled or empty; falling back to heuristic chunker.")
+        llm_units = _chunks_from_ollama_qa_segmentation(envelope, cfg)
+        if llm_units:
+            tag = (llm_units[0].evidence or {}).get("chunker") or "llm_qa_segment"
+            return llm_units, str(tag)
+        _log.info("LLM QA segmentation disabled or empty; falling back to heuristic chunker.")
 
     hc = default_chunker_build_units(envelope)
     return hc, "structured_heuristic"
@@ -560,7 +617,7 @@ def sanitize_evidence_for_grading_prompt(evidence: dict[str, Any]) -> dict[str, 
                     out[k][sk] = d
                 else:
                     out[k][sk] = sv
-        elif k == "_openai_trio_rag_frontload":
+        elif k in ("_openai_trio_rag_frontload", "_claude_structured_units"):
             continue
         elif k == "trio" and isinstance(v, dict):
             tq = _env_int("MULTIMODAL_TRIO_PROMPT_QUESTION_MAX_CHARS", 8_000)

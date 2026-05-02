@@ -5,7 +5,9 @@ order so that each question/prompt is paired with the student's actual response.
 Question boundaries are **not** limited to ``### Question 1.1``-style headings: substantive
 ``##`` / ``###`` lines (e.g. ``## Step 4: …``), plain titles with time estimates
 (``Loading CSV … (5 min)``), and instructional markdown that references ``code block below``
-stay with the prompt until the next code cell. When a **blank** instructor copy is aligned
+stay with the prompt until the next code cell. Readme-style prose (e.g. "In this section we will…",
+homework setup notes) is classified as **question** text, not ``student_response``.
+When a **blank** instructor copy is aligned
 (:mod:`template_aligned_notebook_chunks`), **scaffold code-cell anchors** on the blank
 (``# TODO`` / ``add code`` / placeholders) align the student's response tail by ordinal
 anchor. The text-based heuristic chunker receives pre-flattened plaintext where code
@@ -260,6 +262,46 @@ def _markdown_looks_like_prompt_extension(src: str) -> bool:
     return False
 
 
+def _markdown_reads_as_instructor_readme_or_setup(src: str) -> bool:
+    """
+    Markdown that describes the lab, dataset, or homework setup—not student-authored answers.
+
+    Without this, :func:`build_notebook_qa_chunks` classifies such cells as ``student_text`` and
+    appends them to ``response_parts`` right after a ``section_header``, so ``trio.student_response``
+    duplicates instructions that belong in ``question`` / ``instructor_context``.
+    """
+    low = (src or "").lower().strip()
+    if not low:
+        return False
+    cues = (
+        "in this section we will",
+        "in this section, we will",
+        "we will preprocess",
+        "we have modified",
+        "for the purpose of the homework",
+        "for the purpose of this homework",
+        "for the homework assignment",
+        "practice cleaning your data",
+        "help you practice",
+        "we modified the data",
+        "currently does not have any missing",
+        "synthetic insurance data",
+        "read through this entire",
+        "read through all",
+        "before moving on",
+        "overview of this section",
+    )
+    if any(c in low for c in cues):
+        return True
+    if "**note:**" in low and (
+        "homework" in low or "assignment" in low or "practice" in low or "synthetic" in low
+    ):
+        return True
+    if "synthetic" in low and ("nan" in low or "missing values" in low):
+        return True
+    return False
+
+
 def _matches_any(patterns: list[re.Pattern], text: str) -> bool:
     return any(p.search(text) for p in patterns)
 
@@ -365,6 +407,8 @@ def _classify_markdown(src: str, cell_idx: int) -> str:
         return "question"
     if _is_section_label(src):
         return "section_header"
+    if _markdown_reads_as_instructor_readme_or_setup(src):
+        return "question"
     return "student_text"
 
 

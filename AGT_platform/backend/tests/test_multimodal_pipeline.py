@@ -1241,6 +1241,134 @@ class NotebookChunkingAccuracyTests(unittest.TestCase):
         )
 
 
+class ClaudeStructuredAssignmentChunkerTests(unittest.TestCase):
+    """Claude JSON ``units`` → :class:`GradingChunk` (no live API)."""
+
+    def test_try_build_maps_units_to_trio_schema(self) -> None:
+        from app.grading.multimodal.claude_structured_assignment_chunker import (
+            try_build_claude_structured_assignment_chunks,
+        )
+
+        cfg = Config()
+        cfg.ANTHROPIC_API_KEY = "test-key"
+        cfg.MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING = "on"
+        nb = {"nbformat": 4, "nbformat_minor": 5, "metadata": {}, "cells": []}
+        envelope = ingest_raw_submission(
+            assignment_id="a1",
+            student_id="s1",
+            artifacts={"ipynb": json.dumps(nb).encode("utf-8")},
+            extracted_plaintext="",
+            modality_hints={"answer_key_plaintext": "ref"},
+        )
+        fake = {
+            "units": [
+                {
+                    "question_id": "1.1",
+                    "question": "## 1.1\nSolve",
+                    "student_response": "x = 1",
+                    "answer_key_segment": "x = 1",
+                    "instructor_context": "intro",
+                    "extracted_text": "",
+                }
+            ]
+        }
+        mock_inst = MagicMock()
+        mock_inst.chat_json = MagicMock(return_value=fake)
+        with patch(
+            "app.grading.multimodal.claude_structured_assignment_chunker.AnthropicJsonClient",
+            return_value=mock_inst,
+        ):
+            chunks = try_build_claude_structured_assignment_chunks(envelope, cfg)
+        self.assertIsNotNone(chunks)
+        assert chunks is not None
+        self.assertEqual(len(chunks), 1)
+        trio = (chunks[0].evidence or {}).get("trio")
+        self.assertIsInstance(trio, dict)
+        self.assertEqual(trio.get("question"), "## 1.1\nSolve")
+        self.assertEqual(trio.get("student_response"), "x = 1")
+        self.assertEqual(trio.get("answer_key_segment"), "x = 1")
+        self.assertEqual(trio.get("instructor_context"), "intro")
+        self.assertTrue((chunks[0].evidence or {}).get("_claude_structured_units"))
+
+    def test_build_multimodal_prefers_claude_when_enabled(self) -> None:
+        from app.grading.multimodal.rag_embeddings import build_multimodal_grading_chunks
+
+        cfg = Config()
+        cfg.ANTHROPIC_API_KEY = "test-key"
+        cfg.MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING = "on"
+        nb = {"nbformat": 4, "nbformat_minor": 5, "metadata": {}, "cells": []}
+        envelope = ingest_raw_submission(
+            assignment_id="a1",
+            student_id="s1",
+            artifacts={"ipynb": json.dumps(nb).encode("utf-8")},
+            extracted_plaintext="",
+            modality_hints={"modality_subtype": "notebook"},
+        )
+        fake = {
+            "units": [
+                {
+                    "question_id": "p0",
+                    "question": "Q",
+                    "student_response": "A",
+                    "answer_key_segment": "",
+                    "instructor_context": "",
+                }
+            ]
+        }
+        mock_inst = MagicMock()
+        mock_inst.chat_json = MagicMock(return_value=fake)
+        with patch(
+            "app.grading.multimodal.claude_structured_assignment_chunker.AnthropicJsonClient",
+            return_value=mock_inst,
+        ):
+            chunks, mode = build_multimodal_grading_chunks(envelope, cfg)
+        self.assertEqual(mode, "claude_structured_assignment")
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].question_id, "p0")
+
+    def test_forced_on_falls_back_to_heuristic_when_claude_empty(self) -> None:
+        from app.grading.multimodal import rag_embeddings
+
+        cfg = Config()
+        cfg.ANTHROPIC_API_KEY = "test-key"
+        cfg.MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING = "on"
+        envelope = ingest_raw_submission(
+            assignment_id="a1",
+            student_id="s1",
+            artifacts={},
+            extracted_plaintext="any",
+            modality_hints={},
+        )
+        fallback = GradingChunk(
+            chunk_id="a1:s1:fb:0:pair_1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="pair_1",
+            modality=Modality.UNKNOWN,
+            task_type=TaskType.UNKNOWN,
+            extracted_text="fallback body",
+            evidence={"trio": {"question": "", "student_response": "fallback body", "answer_key_segment": "", "instructor_context": ""}},
+        )
+        mock_inst = MagicMock()
+        mock_inst.chat_json = MagicMock(return_value={"units": []})
+        with patch(
+            "app.grading.multimodal.claude_structured_assignment_chunker.AnthropicJsonClient",
+            return_value=mock_inst,
+        ):
+            with patch.object(
+                rag_embeddings,
+                "default_chunker_build_units",
+                return_value=[fallback],
+            ) as mock_fb:
+                _chunks, mode = rag_embeddings.build_multimodal_grading_chunks(
+                    envelope, cfg
+                )
+        mock_fb.assert_called_once()
+        self.assertEqual(mode, "structured_heuristic_after_claude_fail")
+        self.assertEqual(len(_chunks), 1)
+        self.assertEqual(_chunks[0].extracted_text, "fallback body")
+
+
 class AnswerKeyChunkEnrichTests(unittest.TestCase):
     """Per-question answer key snippets + embeddings on :class:`GradingChunk`."""
 
@@ -2268,19 +2396,18 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         self.assertEqual(len(vec), 16)
         self.assertTrue(src.startswith("openai:"))
 
-    def test_build_multimodal_matches_build_grading_when_backend_ollama(self) -> None:
-        from app.grading.llm_router import (
-            build_grading_clients,
-            build_multimodal_grading_clients,
-        )
+    def test_build_multimodal_grading_clients_openai_only_ignores_ollama_backend(self) -> None:
+        """Multimodal per-chunk grading uses OpenAI even if MULTIMODAL_LLM_BACKEND was ollama."""
+        from app.grading.llm_router import build_multimodal_grading_clients
 
         cfg = Config()
         cfg.MULTIMODAL_LLM_BACKEND = "ollama"
         cfg.OLLAMA_BASE_URL = "http://127.0.0.1:11434"
         cfg.OLLAMA_MODEL = "llama3.2:3b"
-        a = [lbl for _, lbl in build_grading_clients(cfg)]
+        cfg.OPENAI_API_KEY = "sk-test"
+        cfg.OPENAI_MULTIMODAL_GRADING_MODEL = "gpt-5.4-nano"
         b = [lbl for _, lbl in build_multimodal_grading_clients(cfg)]
-        self.assertEqual(a, b)
+        self.assertEqual(b, ["openai:gpt-5.4-nano"])
 
     def test_huggingface_grading_model_id_maps_llama_package_descriptor(self) -> None:
         from app.grading.llm_router import huggingface_grading_model_id
@@ -2292,18 +2419,21 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
             "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
         )
 
-    def test_multimodal_structure_trace_label_huggingface(self) -> None:
+    def test_multimodal_structure_trace_label_anthropic(self) -> None:
         cfg = Config()
-        cfg.MULTIMODAL_LLM_BACKEND = "hf"
-        cfg.HUGGINGFACE_GRADING_MODEL_ID = ""
+        cfg.ANTHROPIC_API_KEY = "sk-ant-test"
+        cfg.MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING = "on"
+        cfg.MULTIMODAL_ANTHROPIC_PARSING_MODEL = "claude-opus-4-7"
         self.assertEqual(
             multimodal_structure_llm_trace_label(cfg),
-            "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            "anthropic:claude-opus-4-7",
         )
 
     def test_multimodal_structure_trace_label_openai(self) -> None:
         cfg = Config()
-        cfg.MULTIMODAL_LLM_BACKEND = "openai"
+        cfg.MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING = "off"
+        cfg.ANTHROPIC_API_KEY = ""
+        cfg.OPENAI_API_KEY = "sk-test"
         cfg.OPENAI_MULTIMODAL_GRADING_MODEL = "gpt-5.4-nano"
         self.assertEqual(multimodal_structure_llm_trace_label(cfg), "gpt-5.4-nano")
 

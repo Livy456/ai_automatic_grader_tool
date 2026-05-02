@@ -27,7 +27,7 @@ from .notebook_chunker import (
 )
 from .schemas import GradingChunk, Modality, TaskType
 from .chunker import modality_from_hints, task_type_from_hints
-from .answer_key_chunk_enrich import _chunk_query_text
+from .answer_key_chunk_enrich import _chunk_query_text, _cosine
 
 _log = logging.getLogger(__name__)
 
@@ -65,14 +65,6 @@ def blank_llm_questions_requested(*, blank_bytes: bytes, cfg: Config | None) -> 
 def _safe_qid(raw: str, idx: int) -> str:
     s = re.sub(r"\s+", " ", (raw or "").strip())
     return s[:120] if s else f"unit_{idx + 1}"
-    if len(a) != len(b) or not a:
-        return 0.0
-    dot = sum(a[i] * b[i] for i in range(len(a)))
-    na = (sum(x * x for x in a)) ** 0.5
-    nb = (sum(y * y for y in b)) ** 0.5
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
-    return float(dot / (na * nb))
 
 
 def _questions_from_blank_llm(plain: str, cfg: Config) -> list[dict[str, str]]:

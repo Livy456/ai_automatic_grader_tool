@@ -150,6 +150,52 @@ class Config:
     ).strip()
 
     OPENAI_API_KEY = _env_str("OPENAI_API_KEY")
+    # Anthropic (Claude) for optional assignment parsing / QA segmentation (see ``rag_embeddings``).
+    ANTHROPIC_API_KEY = _env_str("ANTHROPIC_API_KEY")
+    _anth_parse = _env_str("MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING").strip().lower()
+    if _anth_parse in ("0", "false", "no", "off"):
+        MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING = "off"
+    elif _anth_parse in ("1", "true", "yes", "on"):
+        MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING = "on"
+    else:
+        MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING = "auto"
+    MULTIMODAL_ANTHROPIC_PARSING_MODEL = (
+        _env_str("MULTIMODAL_ANTHROPIC_PARSING_MODEL").strip() or "claude-opus-4-7"
+    )
+    MULTIMODAL_ANTHROPIC_PARSING_MAX_TOKENS = max(
+        1024,
+        min(_env_int("MULTIMODAL_ANTHROPIC_PARSING_MAX_TOKENS", default=16384), 128000),
+    )
+    # Claude structured assignment chunking (see claude_structured_assignment_chunker).
+    # off (default) | auto | on — ``auto`` / ``on`` run only when ANTHROPIC_API_KEY is set.
+    _cc_chunk = _env_str("MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING").strip().lower()
+    if _cc_chunk in ("0", "false", "no", "off"):
+        MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING = "off"
+    elif _cc_chunk in ("1", "true", "yes", "on"):
+        MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING = "on"
+    elif _cc_chunk == "auto":
+        MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING = "auto"
+    else:
+        MULTIMODAL_CLAUDE_STRUCTURED_CHUNKING = "off"
+    MULTIMODAL_CLAUDE_CHUNKING_MODEL = _env_str("MULTIMODAL_CLAUDE_CHUNKING_MODEL").strip()
+    MULTIMODAL_CLAUDE_CHUNKING_MAX_TOKENS = max(
+        0,
+        min(_env_int("MULTIMODAL_CLAUDE_CHUNKING_MAX_TOKENS", default=0), 128000),
+    )
+    MULTIMODAL_CLAUDE_CHUNKING_MAX_STUDENT_CHARS = max(
+        8000,
+        min(
+            _env_int("MULTIMODAL_CLAUDE_CHUNKING_MAX_STUDENT_CHARS", default=120_000),
+            500_000,
+        ),
+    )
+    MULTIMODAL_CLAUDE_CHUNKING_MAX_REF_CHARS = max(
+        1000,
+        min(
+            _env_int("MULTIMODAL_CLAUDE_CHUNKING_MAX_REF_CHARS", default=48_000),
+            200_000,
+        ),
+    )
     OPENAI_MODEL = _env_str("OPENAI_MODEL").strip() or "gpt-4o-mini"
     # If true, re-run or arbitrate grading with OpenAI when local model confidence is low.
     ESCALATE_TO_OPENAI = _env_bool("ESCALATE_TO_OPENAI")
@@ -195,22 +241,20 @@ class Config:
         1,
         min(_env_int("MULTIMODAL_SAMPLES_PER_MODEL", default=5), 16),
     )
-    # When true, each chunk is sent to Ollama once to fill ``evidence["trio"]`` (question /
-    # student_response / instructor_context) before answer-key alignment. Uses
-    # ``MULTIMODAL_TRIO_CHUNKING_MODEL`` or ``OLLAMA_MODEL`` (e.g. Llama 4 Maverick FP8).
+    # When true, each chunk is sent to the **structure** LLM once to fill ``evidence["trio"]``
+    # (question / student_response / instructor_context) before answer-key alignment. Uses
+    # Claude (Anthropic) when configured, else OpenAI — not Ollama.
     MULTIMODAL_LLM_TRIO_CHUNKING = _env_bool("MULTIMODAL_LLM_TRIO_CHUNKING")
     MULTIMODAL_TRIO_CHUNKING_MODEL = _env_str("MULTIMODAL_TRIO_CHUNKING_MODEL").strip()
-    # ollama | huggingface | hf | openai — multimodal **grading** and optional structure LLM
-    # (QA segment, trio when OpenAI frontload is off). ``openai`` uses ``OPENAI_MULTIMODAL_GRADING_MODEL``
-    # (default ``gpt-5.4-nano``) via the OpenAI API. When ``MULTIMODAL_LLM_BACKEND`` is unset and
-    # ``OPENAI_API_KEY`` is set, defaults to ``openai``; otherwise ``ollama``.
+    # ollama | huggingface | hf | openai — legacy env name; multimodal **per-chunk grading** always
+    # uses OpenAI (``OPENAI_MULTIMODAL_GRADING_MODEL``) when ``OPENAI_API_KEY`` is set. Structure
+    # (parsing / trio chunking) uses Claude (Anthropic) then OpenAI — never Ollama in this pipeline.
     _mm_lb = _env_str("MULTIMODAL_LLM_BACKEND").strip().lower()
     if _mm_lb:
-        MULTIMODAL_LLM_BACKEND = {"hf": "huggingface"}.get(_mm_lb, _mm_lb)
+        raw = {"hf": "huggingface"}.get(_mm_lb, _mm_lb)
+        MULTIMODAL_LLM_BACKEND = "openai" if raw == "ollama" else raw
     else:
-        MULTIMODAL_LLM_BACKEND = (
-            "openai" if _env_str("OPENAI_API_KEY").strip() else "ollama"
-        )
+        MULTIMODAL_LLM_BACKEND = "openai"
     # OpenAI chat model for multimodal per-chunk grading when ``MULTIMODAL_LLM_BACKEND=openai``.
     OPENAI_MULTIMODAL_GRADING_MODEL = (
         _env_str("OPENAI_MULTIMODAL_GRADING_MODEL").strip() or "gpt-5.4-nano"
@@ -301,9 +345,15 @@ class Config:
     MULTIMODAL_BLANK_TEMPLATE_CHUNKING = (
         _env_str("MULTIMODAL_BLANK_TEMPLATE_CHUNKING").strip().lower() or "auto"
     )
-    # When a blank ``.ipynb`` is resolved: ``off`` | ``on`` | ``auto`` (try LLM question list when cfg + client exist).
-    MULTIMODAL_BLANK_LLM_QUESTIONS = (
-        _env_str("MULTIMODAL_BLANK_LLM_QUESTIONS").strip().lower() or "auto"
+    # When ``on``, notebook chunking prefers one LLM JSON call with blank ipynb + student ipynb +
+    # answer key (see :mod:`llm_triplet_three_source`). Requires resolved blank bytes, non-empty
+    # ``answer_key_plaintext`` in hints, and OPENAI_API_KEY (preferred) or a structure LLM client.
+    MULTIMODAL_LLM_TRIPLET_THREE_SOURCE = (
+        _env_str("MULTIMODAL_LLM_TRIPLET_THREE_SOURCE").strip().lower()
+    )
+    MULTIMODAL_LLM_TRIPLET_MAX_CHARS_PER_SOURCE = max(
+        8_000,
+        min(_env_int("MULTIMODAL_LLM_TRIPLET_MAX_CHARS_PER_SOURCE", default=1_000_000), 2_000_000),
     )
     # Defaults align with gpt-5.4-nano + text-embedding-3-small list pricing; override if your SKU differs.
     OPENAI_TRIO_RAG_CHAT_INPUT_USD_PER_MTOK = _env_float(

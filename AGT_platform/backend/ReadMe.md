@@ -91,3 +91,14 @@ Use local **transformers** for structure + grading; **RAG vectors** use **Senten
 5. **`RAG_EMBEDDING_BACKEND`** / **`SENTENCE_TRANSFORMERS_MODEL`** — defaults match the multimodal pipeline (no Ollama required for embeddings on this path).
 
 Optional trio/QA segmentation and per-chunk grading both use this Hugging Face primary; **`GRADING_MODEL_2` / `GRADING_MODEL_3`** remain `ollama:` or `openai:` if you add them.
+
+## LLM triplet chunking (blank + student + answer key)
+
+For notebook submissions, you can use a **single structured LLM call** that reads the instructor **blank** (from `blank_assignments/`), the **student** `.ipynb`, and the resolved **answer key** text, and emits `units` with `question` / `student_response` / `answer_key_segment` (same JSON contract as OpenAI trio frontload). The multimodal pipeline then runs answer-key enrichment, **RAG embeddings** on each trio (unless OpenAI frontload already embedded), and writes `{assignment_id}_trio_chunks.json` under `RAG_embedding/` as usual.
+
+- **`MULTIMODAL_LLM_TRIPLET_THREE_SOURCE=on`** — enable this path (default: off). Requires a resolved blank notebook in `modality_hints`, non-empty `answer_key_plaintext`, and **`OPENAI_API_KEY`** (recommended; uses `OPENAI_TRIO_RAG_CHAT_MODEL`) or a working structure LLM from `MULTIMODAL_LLM_BACKEND` / Ollama.
+- **`MULTIMODAL_LLM_TRIPLET_MAX_CHARS_PER_SOURCE`** — max characters per source (blank / student / key) sent to the model before truncation (default **1000000**). Provider context limits still apply.
+- **`MULTIMODAL_LLM_TRIPLET_THREE_SOURCE_PREFER_OPENAI=0`** — force the structure client (Ollama/HF/OpenAI per backend) instead of OpenAI JSON chat when a key exists.
+- **`MULTIMODAL_TRIO_EMBED_NO_CAPS=1`** — when using SentenceTransformers (or non–OpenAI-frontload) RAG, embed full trio strings without the usual per-field character caps (watch memory on huge cells).
+
+When triplet mode is on **and** blank + answer key are present, **OpenAI trio+RAG frontload** is skipped so this path owns chunk boundaries.

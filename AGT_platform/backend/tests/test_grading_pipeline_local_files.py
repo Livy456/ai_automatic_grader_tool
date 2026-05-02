@@ -25,18 +25,15 @@ generic files use :data:`DEFAULT_STANDALONE_RUBRIC` as row templates.
 
 Grading uses :class:`app.grading.multimodal.MultimodalGradingPipeline` with
 :class:`app.grading.multimodal.MultiModelChunkRunner` (``MULTIMODAL_SAMPLES_PER_MODEL`` /
-``GRADING_SAMPLE_TEMPERATURE`` per configured client from ``Config``), then maps the
-result to the shared grading JSON shape via :func:`multimodal_assignment_to_grading_dict`.
-
-Requires a running Ollama matching ``OLLAMA_MODEL`` (and optional ``GRADING_MODEL_2`` /
-``GRADING_MODEL_3`` if you enable extra clients).
+``GRADING_SAMPLE_TEMPERATURE``). Per-chunk grading uses **OpenAI only**
+(``OPENAI_API_KEY`` + ``OPENAI_MULTIMODAL_GRADING_MODEL``); optional ``GRADING_MODEL_2`` /
+``GRADING_MODEL_3`` must be ``openai:…`` specs. This test no longer requires Ollama.
 
 **Why this test can run a long time (it is usually not stuck):** the multimodal pipeline
-calls Ollama ``/api/chat`` **sequentially** — for each text chunk,
-``len(build_multimodal_grading_clients(cfg)) * MULTIMODAL_SAMPLES_PER_MODEL`` requests. Long submissions
-split into many chunks; optional extra grading models multiply the call count;
-``MULTIMODAL_SAMPLES_PER_MODEL`` > 1 multiplies it again. Each call can take up to
-``OLLAMA_CHAT_TIMEOUT_SEC`` (default 300s) if the model is slow or overloaded.
+issues **OpenAI** ``chat_json`` calls **sequentially** — for each grading chunk,
+``len(build_multimodal_grading_clients(cfg)) * MULTIMODAL_SAMPLES_PER_MODEL`` requests. Long
+submissions split into many chunks; optional extra grading models multiply the call count;
+``MULTIMODAL_SAMPLES_PER_MODEL`` > 1 multiplies it again.
 
 **Fast defaults for this test** (so ``pytest`` finishes in minutes, not hours):
 
@@ -48,7 +45,7 @@ split into many chunks; optional extra grading models multiply the call count;
 - ``MULTIMODAL_LOCAL_TEST_MAX_GRADING_UNITS`` defaults to **8** (caps multimodal chunk
   units per assignment). Set to ``0`` or ``all`` for no cap.
 
-Override ``OLLAMA_CHAT_TIMEOUT_SEC`` in ``.env`` if each call is slow.
+Raise provider timeouts in ``.env`` only if your OpenAI calls are slow (rare for small fixtures).
 """
 
 from __future__ import annotations
@@ -111,11 +108,12 @@ def _skip_if_no_local_llm() -> None:
         "yes",
     ):
         raise unittest.SkipTest(
-            "SKIP_LOCAL_LLM_TESTS is set; skipping integration calls to Ollama."
+            "SKIP_LOCAL_LLM_TESTS is set; skipping integration calls to remote LLM APIs."
         )
 
 
 def _ollama_reachable_quick(cfg: Config) -> bool:
+    """Legacy helper (multimodal grading no longer requires Ollama)."""
     base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
     if not base:
         return False
@@ -479,7 +477,6 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
     """Run the multimodal grading pipeline on local assignment + rubric fixtures."""
 
     def test_grade_local_assignments_write_json(self) -> None:
-        # Bind in function scope so subtests always see it (avoids NameError if a module-level import is missing).
         from app.grading.llm_router import build_multimodal_grading_clients
 
         groups = _assignment_groups()
@@ -514,21 +511,10 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
         _skip_if_no_local_llm()
         cfg = Config()
         _multimodal_local_test_grading_samples_override(cfg)
-        if not _ollama_reachable_quick(cfg):
+        if not build_multimodal_grading_clients(cfg):
             raise unittest.SkipTest(
-                "Ollama unreachable at INTERNAL_OLLAMA_URL / OLLAMA_BASE_URL "
-                "(try `ollama serve`, fix URL for laptop vs GPU host, or set "
-                "SKIP_LOCAL_LLM_TESTS=true to skip)."
-            )
-        ok_chat, chat_detail = _ollama_primary_chat_smoke(cfg)
-        if not ok_chat:
-            raise unittest.SkipTest(
-                "Ollama chat smoke test failed — integration would hang on slow/failing "
-                f"/api/chat. Detail: {chat_detail}\n"
-                "Embeddings: 404 on /api/embeddings or /api/embed is OK (hash fallback); "
-                "for real vectors run `ollama pull nomic-embed-text` (or set "
-                "OLLAMA_EMBEDDINGS_MODEL) on a current Ollama build.\n"
-                "Skip this test with SKIP_LOCAL_LLM_TESTS=true if you have no local GPU server."
+                "Multimodal per-chunk grading requires OPENAI_API_KEY (and a valid "
+                "OPENAI_MULTIMODAL_GRADING_MODEL). Ollama is not used for this path anymore."
             )
 
         for stem, paths in sorted(groups.items()):

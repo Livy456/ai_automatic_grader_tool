@@ -3,7 +3,10 @@ Resolve a **blank** instructor copy of an assignment (questions + instructions o
 
 Files live under ``blank_assignments/`` at the repository root (or a caller-provided
 directory). Matching mirrors :func:`app.grading.answer_key_resolve.resolve_answer_key_plaintext`
-stem logic but returns **raw ``.ipynb`` bytes** for notebook-aware chunking.
+stem logic and returns **raw bytes** plus the matched filename suffix for multimodal chunking.
+
+Supported template suffixes: ``.ipynb``, ``.pdf``, ``.docx``, ``.py``, ``.txt``, ``.md``,
+``.csv``, ``.xlsx``.
 """
 
 from __future__ import annotations
@@ -13,7 +16,16 @@ import re
 from pathlib import Path
 from typing import Final
 
-_SUFFIX: Final[tuple[str, ...]] = (".ipynb",)
+_BLANK_SUFFIXES: Final[tuple[str, ...]] = (
+    ".ipynb",
+    ".pdf",
+    ".docx",
+    ".py",
+    ".txt",
+    ".md",
+    ".csv",
+    ".xlsx",
+)
 _MIN_RATIO: Final[float] = 0.38
 
 
@@ -25,23 +37,24 @@ def _normalize_for_match(s: str) -> str:
     return " ".join(t.split())
 
 
-def resolve_blank_assignment_ipynb(
+def resolve_blank_assignment_template(
     assignment_stem: str,
     blank_dir: Path,
-) -> tuple[bytes, str]:
+) -> tuple[bytes, str, str]:
     """
-    Return ``(ipynb_bytes, matched_relative_name)``.
+    Return ``(file_bytes, matched_relative_name, suffix_lower)``.
 
-    Empty bytes when no suitable ``.ipynb`` is found under ``blank_dir``.
+    ``suffix_lower`` includes the leading dot (e.g. ``".ipynb"``). Empty bytes when no
+    suitable file is found under ``blank_dir``.
     """
     if not assignment_stem.strip() or not blank_dir.is_dir():
-        return b"", ""
+        return b"", "", ""
 
-    for suf in _SUFFIX:
+    for suf in _BLANK_SUFFIXES:
         exact = blank_dir / f"{assignment_stem}{suf}"
         if exact.is_file():
             try:
-                return exact.read_bytes(), exact.name
+                return exact.read_bytes(), exact.name, suf.lower()
             except OSError:
                 break
 
@@ -54,7 +67,8 @@ def resolve_blank_assignment_ipynb(
             continue
         if path.name.lower() == "readme.md":
             continue
-        if path.suffix.lower() != ".ipynb":
+        suf = path.suffix.lower()
+        if suf not in _BLANK_SUFFIXES:
             continue
         key_n = _normalize_for_match(path.stem)
         if not key_n:
@@ -67,9 +81,33 @@ def resolve_blank_assignment_ipynb(
             best_path = path
 
     if best_path is None or best_ratio < _MIN_RATIO:
-        return b"", ""
+        return b"", "", ""
 
     try:
-        return best_path.read_bytes(), best_path.name
+        suf = best_path.suffix.lower()
+        return best_path.read_bytes(), best_path.name, suf
     except OSError:
-        return b"", ""
+        return b"", "", ""
+
+
+def resolve_blank_assignment_ipynb(
+    assignment_stem: str,
+    blank_dir: Path,
+) -> tuple[bytes, str]:
+    """
+    Return ``(ipynb_bytes, matched_relative_name)`` — **notebook only** (backward compatible).
+
+    When the matched blank is not ``.ipynb``, returns ``(b"", "")`` so legacy notebook-only
+    chunkers skip; use :func:`resolve_blank_assignment_template` for all file types.
+    """
+    data, name, suf = resolve_blank_assignment_template(assignment_stem, blank_dir)
+    if suf == ".ipynb" and data.strip():
+        return data, name
+    return b"", ""
+
+
+__all__ = [
+    "resolve_blank_assignment_ipynb",
+    "resolve_blank_assignment_template",
+    "_BLANK_SUFFIXES",
+]

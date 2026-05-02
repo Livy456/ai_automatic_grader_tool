@@ -198,6 +198,94 @@ class OpenAIJsonClient:
         return parse_llm_json_content(content), usage
 
 
+class AnthropicJsonClient:
+    """
+    Anthropic Messages API → parsed JSON object (backend-only API key).
+
+    Used for assignment parsing / structured segmentation; mirrors :meth:`OpenAIJsonClient.chat_json`
+    signature so callers can swap clients interchangeably.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        max_tokens: int = 16384,
+    ):
+        self._api_key = (api_key or "").strip()
+        self.model = (model or "").strip()
+        self._max_tokens = max(1024, min(int(max_tokens), 128_000))
+
+    def chat_json(
+        self,
+        messages: list[dict],
+        *,
+        temperature: float | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del response_format  # Anthropic has no JSON schema mode here; prompt enforces JSON only.
+        from anthropic import Anthropic
+
+        client = Anthropic(api_key=self._api_key)
+        system_parts: list[str] = []
+        anth_msgs: list[dict[str, Any]] = []
+        for m in messages:
+            role = str(m.get("role") or "user").strip().lower()
+            content = m.get("content") or ""
+            if role == "system":
+                system_parts.append(str(content))
+                continue
+            if role not in ("user", "assistant"):
+                role = "user"
+            anth_msgs.append({"role": role, "content": str(content)})
+        if not anth_msgs:
+            anth_msgs = [{"role": "user", "content": ""}]
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self._max_tokens,
+            "messages": anth_msgs,
+        }
+        if system_parts:
+            kwargs["system"] = "\n\n".join(system_parts).strip()
+        if temperature is not None:
+            kwargs["temperature"] = float(temperature)
+        msg = client.messages.create(**kwargs)
+        text = ""
+        for block in getattr(msg, "content", []) or []:
+            if getattr(block, "type", None) == "text":
+                text += getattr(block, "text", "") or ""
+        return parse_llm_json_content(text)
+
+
+def anthropic_multimodal_structure_client(
+    cfg: Config,
+) -> tuple[AnthropicJsonClient, str] | None:
+    """
+    Claude client for multimodal **structure** only (assignment parsing, trio labeling,
+    blank-question inventory, triplet-three-source when not using OpenAI there).
+
+    Respects ``MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING`` (``auto`` / ``on`` / ``off``) and
+    ``ANTHROPIC_API_KEY``. Returns ``None`` when disabled or the key is missing.
+    """
+    key = (getattr(cfg, "ANTHROPIC_API_KEY", "") or "").strip()
+    mode = (
+        getattr(cfg, "MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING", "auto") or "auto"
+    ).strip().lower()
+    if not key or mode in ("off", "false", "0", "no"):
+        return None
+    if mode not in ("on", "auto"):
+        return None
+    model = (
+        getattr(cfg, "MULTIMODAL_ANTHROPIC_PARSING_MODEL", "") or ""
+    ).strip() or "claude-opus-4-7"
+    try:
+        mt = int(getattr(cfg, "MULTIMODAL_ANTHROPIC_PARSING_MAX_TOKENS", 16384) or 16384)
+    except (TypeError, ValueError):
+        mt = 16384
+    return AnthropicJsonClient(key, model, max_tokens=mt), f"anthropic:{model}"
+
+
 def _ollama_keep_alive(cfg: Config) -> str | None:
     """Return ``keep_alive`` value for Ollama requests.
 
@@ -314,7 +402,7 @@ def multimodal_llm_backend_uses_openai(cfg: Config) -> bool:
 
 
 def openai_multimodal_grading_model(cfg: Config) -> str:
-    """Chat model id for multimodal grading / structure when backend is ``openai``."""
+    """Chat model id for multimodal **per-chunk grading** (OpenAI API)."""
     m = (getattr(cfg, "OPENAI_MULTIMODAL_GRADING_MODEL", "") or "").strip()
     if m:
         return m
@@ -325,7 +413,7 @@ def openai_multimodal_grading_model(cfg: Config) -> str:
 
 
 def huggingface_grading_model_id(cfg: Config) -> str:
-    """HF repo id for multimodal structure + grading when backend is Hugging Face."""
+    """HF repo id for **non-multimodal** / legacy paths that still use local transformers."""
     rid = (getattr(cfg, "HUGGINGFACE_GRADING_MODEL_ID", "") or "").strip()
     if rid:
         return _normalize_hf_grading_model_id(rid)
@@ -348,50 +436,44 @@ def huggingface_json_client_from_config(
 
 def build_multimodal_grading_clients(cfg: Config) -> list[tuple[ChatClient, str]]:
     """
-    Multimodal chunk grading: primary from ``MULTIMODAL_LLM_BACKEND`` (``openai``, Hugging Face,
-    or Ollama), plus optional ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` (``ollama:`` / ``openai:``).
+    Multimodal per-chunk **grading** via **OpenAI only** (``OPENAI_MULTIMODAL_GRADING_MODEL``).
+
+    Optional ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` may add extra ``openai:`` models.
+    Ollama specs are ignored. Parsing and trio chunking use Claude/OpenAI via
+    :func:`anthropic_multimodal_structure_client` and :func:`app.grading.multimodal.rag_embeddings._multimodal_structure_chat_client`.
     """
-    if multimodal_llm_backend_uses_huggingface(cfg):
-        mid = huggingface_grading_model_id(cfg)
-        primary = huggingface_json_client_from_config(cfg, mid)
-        clients: list[tuple[ChatClient, str]] = [(primary, f"huggingface:{mid}")]
-    elif multimodal_llm_backend_uses_openai(cfg):
-        key = (cfg.OPENAI_API_KEY or "").strip()
-        omid = openai_multimodal_grading_model(cfg)
-        if key:
-            clients = [(OpenAIJsonClient(key, omid), f"openai:{omid}")]
-        else:
-            _log.warning(
-                "MULTIMODAL_LLM_BACKEND=openai but OPENAI_API_KEY is empty; "
-                "falling back to primary Ollama client"
-            )
-            primary = primary_ollama_client(cfg)
-            oll = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
-            clients = [(primary, f"ollama:{oll}")]
-    else:
-        primary = primary_ollama_client(cfg)
-        om = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
-        clients = [(primary, f"ollama:{om}")]
+    key = (cfg.OPENAI_API_KEY or "").strip()
+    if not key:
+        _log.warning(
+            "Multimodal grading requires OPENAI_API_KEY; no OpenAI grading clients configured."
+        )
+        return []
+    omid = openai_multimodal_grading_model(cfg)
+    clients: list[tuple[ChatClient, str]] = [(OpenAIJsonClient(key, omid), f"openai:{omid}")]
 
     for spec in (cfg.GRADING_MODEL_2, cfg.GRADING_MODEL_3):
         parsed = _parse_model_spec(spec, cfg)
-        if parsed:
-            clients.append(parsed)
+        if not parsed:
+            continue
+        if parsed[1].startswith("ollama:"):
+            _log.warning(
+                "Skipping GRADING_MODEL_*=%r (multimodal grading is OpenAI-only, not Ollama).",
+                spec,
+            )
+            continue
+        clients.append(parsed)
 
     return clients
 
 
 def multimodal_structure_llm_trace_label(cfg: Config) -> str:
-    """Human-readable model id for logs / ``_agentic_workflow`` (trio / QA segment)."""
-    if multimodal_llm_backend_uses_huggingface(cfg):
-        return huggingface_grading_model_id(cfg)
-    if multimodal_llm_backend_uses_openai(cfg):
+    """Human-readable model id for logs / ``_agentic_workflow`` (structure: Claude or OpenAI)."""
+    a = anthropic_multimodal_structure_client(cfg)
+    if a is not None:
+        return a[1]
+    if (cfg.OPENAI_API_KEY or "").strip():
         return openai_multimodal_grading_model(cfg)
-    m = (getattr(cfg, "MULTIMODAL_TRIO_CHUNKING_MODEL", "") or "").strip()
-    if m:
-        return m
-    om = (getattr(cfg, "OLLAMA_MODEL", "") or "").strip()
-    return om or "(structure_llm)"
+    return "(no_structure_llm)"
 
 
 def maybe_escalate_grade(

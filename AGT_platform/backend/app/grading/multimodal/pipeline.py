@@ -12,10 +12,10 @@ runs one or more chat calls (overlapping windows when the submission is long) wi
 ``OPENAI_TRIO_RAG_CHAT_MODEL`` (default ``gpt-5.4-nano``) to emit
 trio JSON plus OpenAI **Embeddings** for each unit (``OPENAI_TRIO_RAG_EMBEDDING_MODEL``), and
 trio relabeling via ``MULTIMODAL_LLM_TRIO_CHUNKING`` is skipped. Otherwise optional
-:func:`app.grading.multimodal.rag_embeddings.refine_chunks_trio_with_ollama` uses the structure
-model from ``MULTIMODAL_LLM_BACKEND`` (``openai``, Ollama, or Hugging Face / Maverick). Per-chunk
-**grading** uses the same ``MULTIMODAL_LLM_BACKEND`` (default **openai** / ``gpt-5.4-nano`` when
-``OPENAI_API_KEY`` is set, else **ollama**). RAG embeddings otherwise use
+:func:`app.grading.multimodal.rag_embeddings.refine_chunks_trio_with_structure_llm` uses **Claude**
+(Anthropic) when configured, else **OpenAI**, for trio fields—**Ollama is not used**. Per-chunk
+**grading** uses **OpenAI only** (``OPENAI_MULTIMODAL_GRADING_MODEL`` / ``OPENAI_API_KEY``).
+RAG embeddings otherwise use
 ``RAG_EMBEDDING_BACKEND`` (``sentence_transformers`` default, or ``openai`` for the same OpenAI
 embeddings API without frontload) / ``SENTENCE_TRANSFORMERS_MODEL``.
 
@@ -23,15 +23,19 @@ embeddings API without frontload) / ``SENTENCE_TRANSFORMERS_MODEL``.
 :func:`app.grading.answer_key_resolve.resolve_answer_key_plaintext` against
 ``modality_hints["answer_key_dir"]`` or the repository ``answer_key/`` folder.
 
-**Blank template (optional):** when the submission is an ``.ipynb``, the pipeline resolves a
-matching blank instructor notebook via :func:`app.grading.blank_assignment_resolve.resolve_blank_assignment_ipynb`
-under ``modality_hints["blank_assignments_dir"]`` or the repository ``blank_assignments/`` folder
-and stores bytes in ``modality_hints["blank_assignment_ipynb_bytes"]``. Chunking then aligns
-question text from that template with the student's cells (``MULTIMODAL_BLANK_TEMPLATE_CHUNKING``).
+**Blank template (optional):** the pipeline resolves a matching instructor **template file**
+(``.ipynb``, ``.pdf``, ``.docx``, ``.py``, ``.txt``, ``.md``, ``.csv``, ``.xlsx``) via
+:func:`app.grading.blank_assignment_resolve.resolve_blank_assignment_template` under
+``modality_hints["blank_assignments_dir"]`` or ``blank_assignments/``, storing bytes in
+``modality_hints["blank_assignment_template_bytes"]`` and the suffix in
+``blank_assignment_template_suffix``. When the template is ``.ipynb``, the same bytes are also
+stored in ``blank_assignment_ipynb_bytes`` for notebook-only chunkers. Chunking aligns the
+template with the student submission when ``MULTIMODAL_BLANK_TEMPLATE_CHUNKING`` allows it.
 When ``MULTIMODAL_BLANK_LLM_QUESTIONS`` is not ``off`` and a structure LLM is available, distinct
 questions are inferred from the blank via LLM JSON before student/answer-key pairing.
-OpenAI trio+RAG frontload is skipped when that blank-template path is active so chunk boundaries
-stay consistent with the three-source model.
+OpenAI trio+RAG frontload is skipped when blank-template chunking is active **or** when
+``MULTIMODAL_LLM_TRIPLET_THREE_SOURCE`` is on with resolved blank + answer key so
+:mod:`llm_triplet_three_source` can own trios (single structured LLM call over blank + student + key).
 
 **Chunk cache:** set ``modality_hints["multimodal_chunk_cache_path"]`` to a JSON file produced
 by :func:`app.grading.multimodal.chunk_cache.save_grading_chunks_cache` to skip rebuilding
@@ -42,11 +46,11 @@ chunks and (when embeddings are present in the file) skip per-unit embedding cal
 (slim trio text per chunk, no embedding vectors). Set ``skip_trio_chunks_json_export`` in hints
 to disable.
 
-**Notebook chunking export:** for ``.ipynb`` submissions, after chunking the pipeline also
-writes ``{assignment_id}_{student_id}_chunking.json`` under
-``modality_hints["assignment_chunking_output_dir"]`` or ``assignment_chunking/`` at the repo
-root (full chunk metadata with sanitized ``evidence``, no raw embedding vectors). Set
-``skip_assignment_chunking_json_export`` in hints to disable.
+**Notebook / assignment chunking export:** after chunking, the pipeline writes
+``{assignment_id}_{student_id}_chunking.json`` under ``modality_hints["rag_embedding_output_dir"]``
+or the repository ``RAG_embedding/`` folder (full chunk metadata with sanitized ``evidence``,
+no raw embedding vectors). Set ``skip_assignment_chunking_json_export`` in hints to disable.
+The legacy ``assignment_chunking_output_dir`` hint still overrides the directory when set.
 
 **Placeholder strip:** after chunking (and optional trio LLM), boilerplate lines such as
 ``# write code for problem 1.1 here`` / ``# your code here`` are removed from chunk text and
@@ -58,7 +62,7 @@ before answer-key alignment and grading.
 
 **Answer key size:** the string passed into chunk prompts is capped at
 ``MULTIMODAL_ANSWER_KEY_PROMPT_MAX_CHARS`` (default 18000) to avoid huge prompts that
-often cause local Ollama timeouts.
+often cause provider timeouts.
 """
 
 from __future__ import annotations
@@ -74,7 +78,7 @@ from typing import Any, Callable
 
 from app.config import Config
 from app.grading.answer_key_resolve import resolve_answer_key_plaintext
-from app.grading.blank_assignment_resolve import resolve_blank_assignment_ipynb
+from app.grading.blank_assignment_resolve import resolve_blank_assignment_template
 from app.grading.llm_router import multimodal_structure_llm_trace_label
 from app.grading.dataset_resolve import attach_dataset_context_for_notebook
 
@@ -99,13 +103,14 @@ from .openai_trio_rag_frontload import (
     multimodal_openai_trio_rag_frontload_enabled,
     run_openai_trio_rag_frontload,
 )
+from .llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
 from .template_aligned_notebook_chunks import blank_template_chunking_requested
 from .rag_embeddings import (
     build_multimodal_grading_chunks,
     enrich_chunks_with_rag_embeddings,
     multimodal_llm_trio_chunking_enabled,
     multimodal_rag_embed_units_enabled,
-    refine_chunks_trio_with_ollama,
+    refine_chunks_trio_with_structure_llm,
 )
 from .schemas import (
     AssignmentGradeResult,
@@ -207,7 +212,10 @@ def _assignment_chunking_export_payload(
     envelope: IngestionEnvelope,
 ) -> dict[str, Any]:
     """Serializable chunking audit (embeddings stripped from ``evidence``)."""
-    from .rag_embeddings import sanitize_evidence_for_grading_prompt
+    from .rag_embeddings import (
+        ASSIGNMENT_PARSING_SYSTEM_PROMPT,
+        sanitize_evidence_for_grading_prompt,
+    )
 
     rows: list[dict[str, Any]] = []
     for ch in chunks:
@@ -229,6 +237,7 @@ def _assignment_chunking_export_payload(
         "student_id": envelope.student_id,
         "chunker_mode": chunker_mode,
         "n_chunks": len(chunks),
+        "assignment_parsing_system_prompt": ASSIGNMENT_PARSING_SYSTEM_PROMPT,
         "chunks": rows,
     }
 
@@ -240,17 +249,21 @@ def _try_persist_assignment_chunking_json(
     chunker_mode: str,
     wf: Callable[..., None],
 ) -> None:
-    """Persist notebook-oriented chunking JSON for debugging and downstream tools."""
+    """Persist chunking JSON (all modalities) next to RAG trio exports for downstream tools."""
     if hints.get("skip_assignment_chunking_json_export"):
         return
-    if not envelope.artifacts.get("ipynb"):
-        return
-    raw_dir = hints.get("assignment_chunking_output_dir")
-    root = Path(str(raw_dir)).expanduser() if raw_dir else default_assignment_chunking_dir()
+    raw_dir = hints.get("assignment_chunking_output_dir") or hints.get(
+        "rag_embedding_output_dir"
+    )
+    root = (
+        Path(str(raw_dir)).expanduser()
+        if raw_dir
+        else default_rag_embedding_dir()
+    )
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        _log.warning("Could not create assignment_chunking directory %s: %s", root, exc)
+        _log.warning("Could not create chunking export directory %s: %s", root, exc)
         return
     stem_a = _safe_trio_export_stem(envelope.assignment_id)
     stem_s = _safe_trio_export_stem(envelope.student_id)
@@ -341,21 +354,28 @@ class MultimodalGradingPipeline:
 
         raw_blank_dir = str(hints.get("blank_assignments_dir") or "").strip()
         blank_dir = Path(raw_blank_dir).expanduser() if raw_blank_dir else default_blank_assignments_dir()
-        if not hints.get("blank_assignment_ipynb_bytes"):
-            blank_bytes, blank_name = resolve_blank_assignment_ipynb(
+        if not hints.get("blank_assignment_template_bytes"):
+            tpl_b, tpl_name, tpl_suf = resolve_blank_assignment_template(
                 envelope.assignment_id, blank_dir
             )
-            if blank_bytes.strip():
-                hints["blank_assignment_ipynb_bytes"] = blank_bytes
-                if blank_name:
-                    hints["blank_assignment_matched_file"] = blank_name
-        _bb = hints.get("blank_assignment_ipynb_bytes")
-        _n_blank = len(bytes(_bb)) if isinstance(_bb, (bytes, bytearray)) else 0
+            if tpl_b.strip():
+                hints["blank_assignment_template_bytes"] = tpl_b
+                hints["blank_assignment_template_suffix"] = tpl_suf
+                if tpl_name:
+                    hints["blank_assignment_matched_file"] = tpl_name
+            if tpl_suf == ".ipynb" and tpl_b.strip():
+                hints["blank_assignment_ipynb_bytes"] = tpl_b
+        _tpl = hints.get("blank_assignment_template_bytes")
+        _nb = hints.get("blank_assignment_ipynb_bytes")
+        _n_blank = len(bytes(_tpl)) if isinstance(_tpl, (bytes, bytearray)) else 0
+        if not _n_blank:
+            _n_blank = len(bytes(_nb)) if isinstance(_nb, (bytes, bytearray)) else 0
         wf(
             "resolve_blank_assignment",
-            blank_ipynb_bytes=_n_blank,
+            blank_template_bytes=_n_blank,
             matched_file=str(hints.get("blank_assignment_matched_file") or ""),
             search_dir=str(blank_dir),
+            template_suffix=str(hints.get("blank_assignment_template_suffix") or ""),
         )
 
         require_ak = bool(self.config.require_answer_key) or (
@@ -413,18 +433,38 @@ class MultimodalGradingPipeline:
                     "multimodal_chunk_cache_path missing or invalid; rebuilding chunks (%s)",
                     cache_read,
                 )
-            raw_b = hints.get("blank_assignment_ipynb_bytes")
-            blank_ipynb_b = bytes(raw_b) if isinstance(raw_b, (bytes, bytearray)) else b""
-            skip_openai_for_blank_template = bool(
+            raw_tpl = hints.get("blank_assignment_template_bytes")
+            raw_nb = hints.get("blank_assignment_ipynb_bytes")
+            blank_for_flags = (
+                bytes(raw_tpl)
+                if isinstance(raw_tpl, (bytes, bytearray))
+                else (
+                    bytes(raw_nb) if isinstance(raw_nb, (bytes, bytearray)) else b""
+                )
+            )
+            has_student_artifacts = bool(
+                envelope.artifacts
+                and any(
+                    isinstance(v, (bytes, bytearray)) and len(bytes(v).strip()) > 0
+                    for v in envelope.artifacts.values()
+                )
+            )
+            skip_openai_frontload = bool(
                 envelope.artifacts.get("ipynb")
                 and blank_template_chunking_requested(
-                    blank_bytes=blank_ipynb_b, cfg=app_cfg
+                    blank_bytes=blank_for_flags, cfg=app_cfg
                 )
+            ) or bool(
+                app_cfg is not None
+                and multimodal_llm_triplet_three_source_enabled(app_cfg)
+                and bool(blank_for_flags.strip())
+                and bool(answer_key_plain.strip())
+                and has_student_artifacts
             )
             if (
                 app_cfg is not None
                 and multimodal_openai_trio_rag_frontload_enabled(app_cfg)
-                and not skip_openai_for_blank_template
+                and not skip_openai_frontload
             ):
                 fl_chunks, fl_audit = run_openai_trio_rag_frontload(
                     envelope, app_cfg, answer_key_for_prompt
@@ -455,7 +495,7 @@ class MultimodalGradingPipeline:
 
         if app_cfg is not None and chunks and multimodal_llm_trio_chunking_enabled(app_cfg):
             if not openai_frontload_ok:
-                refine_chunks_trio_with_ollama(chunks, app_cfg)
+                refine_chunks_trio_with_structure_llm(chunks, app_cfg)
                 wf(
                     "trio_llm_chunking",
                     n_chunks=len(chunks),
@@ -744,12 +784,11 @@ def create_multimodal_pipeline_from_app_config(
     """
     Build :class:`MultimodalGradingPipeline` with :class:`MultiModelChunkRunner`.
 
-    Uses :func:`~app.grading.llm_router.build_multimodal_grading_clients` (primary from
-    ``MULTIMODAL_LLM_BACKEND``: ``openai`` (``OPENAI_MULTIMODAL_GRADING_MODEL`` / API key),
-    Ollama ``OLLAMA_MODEL``, or Hugging Face repo id, plus optional
-    ``GRADING_MODEL_2`` / ``GRADING_MODEL_3``), ``MULTIMODAL_SAMPLES_PER_MODEL``
-    and ``GRADING_SAMPLE_TEMPERATURE`` for stochastic multi-sample grading; semantic entropy
-    is computed downstream from cluster counts over those samples.
+    Uses :func:`~app.grading.llm_router.build_multimodal_grading_clients` (**OpenAI only** for
+    per-chunk grading via ``OPENAI_MULTIMODAL_GRADING_MODEL``), plus optional
+    ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` (``openai:`` specs only; Ollama is ignored),
+    ``MULTIMODAL_SAMPLES_PER_MODEL`` and ``GRADING_SAMPLE_TEMPERATURE`` for stochastic
+    multi-sample grading; semantic entropy is computed downstream from cluster counts over those samples.
     """
     mm = multimodal_cfg or MultimodalGradingConfig()
     runner = MultiModelChunkRunner(app_cfg)

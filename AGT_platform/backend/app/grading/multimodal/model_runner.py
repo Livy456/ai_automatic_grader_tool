@@ -2,8 +2,7 @@
 Protocol for M models × k samples per chunk.
 
 ``MultiModelChunkRunner`` uses :func:`app.grading.llm_router.build_multimodal_grading_clients`
-(primary **openai**, Ollama, or Hugging Face per ``MULTIMODAL_LLM_BACKEND``, plus optional
-``GRADING_MODEL_2`` / ``GRADING_MODEL_3``) and draws
+(OpenAI-only for per-chunk grading) and draws
 ``MULTIMODAL_SAMPLES_PER_MODEL`` stochastic samples **per client** at
 ``GRADING_SAMPLE_TEMPERATURE``.
 """
@@ -98,7 +97,7 @@ class MockChunkModelRunner:
 class MultiModelChunkRunner:
     """
     For each configured grading client, run ``MULTIMODAL_SAMPLES_PER_MODEL``
-    ``chat_json`` calls (default 5 for a single primary Ollama model).
+    ``chat_json`` calls (default 5 for a single primary OpenAI model).
 
     Semantic entropy over parsed outcomes is computed in
     :class:`MultimodalGradingPipeline` from cluster assignments of these samples.

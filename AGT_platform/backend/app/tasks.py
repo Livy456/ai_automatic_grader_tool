@@ -270,7 +270,25 @@ def grade_submission(self, submission_id: int):
 def _artifact_bucket_key(kind: str, filename: str) -> str | None:
     k = (kind or "").lower().split(".")[-1]
     fn = (filename or "").lower()
-    for ext in ("pdf", "txt", "ipynb", "py", "mp4", "zip", "png", "jpg", "jpeg", "docx"):
+    for ext in (
+        "pdf",
+        "txt",
+        "ipynb",
+        "py",
+        "mp4",
+        "mp3",
+        "wav",
+        "m4a",
+        "webm",
+        "zip",
+        "png",
+        "jpg",
+        "jpeg",
+        "docx",
+        "csv",
+        "xlsx",
+        "md",
+    ):
         if k == ext or fn.endswith(f".{ext}"):
             if ext == "jpeg":
                 return "jpg"

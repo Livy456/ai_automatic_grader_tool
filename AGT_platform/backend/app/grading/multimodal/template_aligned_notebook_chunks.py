@@ -327,7 +327,9 @@ def try_build_blank_template_aligned_chunks(
 ) -> tuple[list[GradingChunk], str] | None:
     """If hints carry blank bytes and mode allows, return aligned chunks."""
     hints = envelope.modality_hints or {}
-    raw_blank = hints.get("blank_assignment_ipynb_bytes")
+    raw_blank = hints.get("blank_assignment_template_bytes")
+    if raw_blank is None:
+        raw_blank = hints.get("blank_assignment_ipynb_bytes")
     blank_bytes = raw_blank if isinstance(raw_blank, (bytes, bytearray)) else b""
     blank_bytes = bytes(blank_bytes)
     if not blank_template_chunking_requested(blank_bytes=blank_bytes, cfg=cfg):
