@@ -4,7 +4,7 @@ import json
 import unittest
 
 from app.grading.multimodal.parser import parse_chunk_grade_json
-from app.grading.rubric_credit_calibration import (
+from app.grading.multimodal.rubric_calibration import (
     DEFAULT_ANCHOR_HALFSTEPS_0_TO_4,
     anchor_map_monotone_increasing,
     ceiling_half_point_on_grid,

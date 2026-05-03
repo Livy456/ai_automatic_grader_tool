@@ -1,6 +1,17 @@
 """
-Multimodal grading pipeline: ingestion → chunking → rubric routing → grading →
+Multimodal grading pipeline: ingestion → chunking → rubric routing → per-chunk grading →
 uncertainty → aggregation → output.
+
+**Scope:** This package owns **unit-level** multimodal grading (notebooks, PDFs, mixed
+artifacts). Shared helpers that are also used outside multimodal (e.g. ``submission_chunks``,
+``grading_units``, ``app.grading.rag_embeddings.compute_submission_embedding``) stay under
+``app.grading`` to avoid circular imports.
+
+**Celery / DB grading:** :mod:`app.tasks` calls
+:func:`~app.grading.multimodal.course_multimodal_runner.run_db_submission_multimodal_pipeline`
+and :func:`~app.grading.multimodal.course_multimodal_runner.run_standalone_multimodal_pipeline`
+(both wrap :class:`MultimodalGradingPipeline`). Local multimodal runs use the same factory;
+tests live under ``tests/test_multimodal_pipeline.py``.
 
 See ``AGT_platform/backend/docs/multimodal_grading_pipeline.md`` for architecture.
 """
@@ -8,7 +19,7 @@ See ``AGT_platform/backend/docs/multimodal_grading_pipeline.md`` for architectur
 from __future__ import annotations
 
 from .grading_output import multimodal_assignment_to_grading_dict
-from .model_runner import ChunkModelRunner, MockChunkModelRunner, MultiModelChunkRunner
+from .model_runner import ChunkModelRunner, MultiModelChunkRunner
 from .semantic_confidence import (
     aggregate_assignment_confidence,
     cluster_assignment,
@@ -45,7 +56,6 @@ __all__ = [
     "compute_semantic_entropy",
     "estimate_cluster_distribution",
     "GradingChunk",
-    "MockChunkModelRunner",
     "MultiModelChunkRunner",
     "multimodal_assignment_to_grading_dict",
     "normalize_entropy_to_confidence",

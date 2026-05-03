@@ -320,25 +320,11 @@ def openai_multimodal_grading_model(cfg: Config) -> str:
 
 
 def huggingface_grading_model_id(cfg: Config) -> str:
-    """HF repo id for **non-multimodal** / legacy paths that still use local transformers."""
+    """HF repo id for diagnostics when ``MULTIMODAL_LLM_BACKEND`` is ``huggingface`` (not used for API grading)."""
     rid = (getattr(cfg, "HUGGINGFACE_GRADING_MODEL_ID", "") or "").strip()
     if rid:
         return _normalize_hf_grading_model_id(rid)
     return _DEFAULT_HF_MAVERICK_FP8
-
-
-def huggingface_json_client_from_config(
-    cfg: Config, model_id: str | None = None
-) -> ChatClient:
-    """Local ``transformers`` chat client (lazy-load weights on first ``chat_json``)."""
-    from .hf_local_chat import HuggingFaceJsonChatClient
-
-    mid = _normalize_hf_grading_model_id((model_id or huggingface_grading_model_id(cfg)).strip())
-    if not mid:
-        raise ValueError(
-            "HUGGINGFACE_GRADING_MODEL_ID is empty; set it or use the default Maverick FP8 repo."
-        )
-    return HuggingFaceJsonChatClient(cfg, mid)
 
 
 def build_multimodal_grading_clients(cfg: Config) -> list[tuple[ChatClient, str]]:

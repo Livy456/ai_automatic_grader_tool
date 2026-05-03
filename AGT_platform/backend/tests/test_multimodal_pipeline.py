@@ -7,15 +7,11 @@ per-chunk grading, not notebook or RAG chunking.
 Chunking is recorded under ``pipeline_audit`` → ``chunking``; failures there would indicate
 a chunking issue.
 
-- **Unit tests** (routing, entropy, etc.): fast where marked; no live LLM.
-- **Mock pipeline** (``MultimodalPipelineRunTests``): uses ``MockChunkModelRunner`` and
-  synthetic plaintext — **not** ``assignments_to_grade/``. Set
-  ``SKIP_MOCK_MULTIMODAL_PIPELINE_TESTS=1`` to skip this class when running the whole module.
+- **Unit tests** (routing, entropy, etc.): fast where marked; no live LLM where avoided.
 - **Integration — real grading** (``LocalAssignmentGradingTests``): grades **every**
   assignment under ``assignments_to_grade/`` (grouped by stem) using
   ``rubric/default.json`` **or**, when that file is absent, the four ``rubric/[Generic] …``
-  JSON files merged for ``rubric_rows_by_type``, via ``create_multimodal_pipeline_from_app_config``
-  (no mock runner).
+  JSON files merged for ``rubric_rows_by_type``, via ``create_multimodal_pipeline_from_app_config``.
   By default the **chat / structure LLM** is **OpenAI** (``gpt-5.4-nano``) when
   ``OPENAI_API_KEY`` is set in the environment; otherwise **Hugging Face** Maverick
   (``Llama-4-Maverick-17B-128E-Instruct:fp8``). Set ``MULTIMODAL_INTEGRATION_LLM_BACKEND=huggingface``
@@ -59,21 +55,16 @@ from app.grading.grading_units import build_grading_units_from_chunks
 from app.grading.modality_resolution import resolve_modality_profile
 from app.grading.multimodal import (
     MultimodalGradingConfig,
-    MultimodalGradingPipeline,
     Modality,
-    PipelineArtifactStore,
     TaskType,
     create_multimodal_pipeline_from_app_config,
     multimodal_assignment_to_grading_dict,
 )
-from app.grading.multimodal.pipeline import build_envelope_from_plaintext
 from app.grading.multimodal.ingestion import ingest_raw_submission
 from app.grading.multimodal.schemas import (
     GradingChunk,
     RubricType,
-    SampledChunkGrade,
 )
-from app.grading.multimodal.model_runner import MockChunkModelRunner
 from app.grading.multimodal.rubric_router import RubricRouteResult, route_rubric
 from app.grading.multimodal.entropy import semantic_entropy_from_cluster_counts
 from app.grading.multimodal.parser import parse_chunk_grade_json
@@ -90,7 +81,7 @@ from app.grading.multimodal.notebook_chunker import (
 from app.grading.multimodal.template_aligned_notebook_chunks import (
     build_blank_template_aligned_notebook_chunks,
 )
-from app.grading.blank_assignment_resolve import resolve_blank_assignment_ipynb
+from app.grading.answer_key_resolve import resolve_blank_assignment_ipynb
 from app.grading.multimodal.prompts_chunk import build_chunk_grading_prompt
 from app.grading.multimodal.rag_embeddings import (
     build_multimodal_grading_chunks,
@@ -709,16 +700,6 @@ def _configure_for_integration_test(cfg: Config) -> None:
 # Unit tests (fast, no LLM)
 # ---------------------------------------------------------------------------
 
-_MOCK_STEM = "test_multimodal_pipeline_mock"
-_SAMPLE_PLAINTEXT = (
-    "=== NOTEBOOK MARKDOWN (ipynb) ===\n"
-    "# Part 1. Reflection on Data Ethics\n\n"
-    "Data ethics is important because it ensures that the data we collect "
-    "and use is handled responsibly.\n\n"
-    "=== NOTEBOOK CODE (ipynb) ===\n"
-    "import pandas as pd\ndf = pd.read_csv('data.csv')\nprint(df.head())\n"
-)
-
 _FREE_RESPONSE_RUBRIC = [
     {"name": "Conceptual Correctness", "max_points": 4, "criterion": "Conceptual Correctness",
      "max_score": 4, "description": "Accuracy and depth."},
@@ -745,29 +726,6 @@ _EDA_RUBRIC_STUB = [
     {"name": "Problem Framing", "max_points": 3, "criterion": "Problem Framing",
      "max_score": 3, "description": "Scope."},
 ]
-
-
-def _make_sample_json(norm: float, *, confidence_note: str = "") -> str:
-    criteria = [
-        {"name": "Functional Correctness", "score": round(norm * 4), "max_points": 4},
-        {"name": "Logical Implementation", "score": round(norm * 3), "max_points": 3},
-        {"name": "Code Quality", "score": round(norm * 2), "max_points": 2},
-        {"name": "Edge Case Awareness", "score": round(norm * 1), "max_points": 1},
-    ]
-    total = sum(c["score"] for c in criteria)
-    max_total = sum(c["max_points"] for c in criteria)
-    return json.dumps({
-        "rubric_type": "programming_scaffolded",
-        "criterion_scores": criteria,
-        "criterion_justifications": [
-            f"Score {c['score']}/{c['max_points']} — evidence for {c['name']}."
-            for c in criteria
-        ],
-        "total_score": total,
-        "normalized_score": round(total / max_total, 4) if max_total else 0,
-        "confidence_note": confidence_note or "Graded from student evidence.",
-        "review_flag": False,
-    })
 
 
 class AnswerKeyCodeMatchTests(unittest.TestCase):
@@ -975,79 +933,8 @@ class MultimodalRoutingTests(unittest.TestCase):
         self.assertGreater(h, 0.0)
 
 
-@unittest.skipIf(
-    os.getenv("SKIP_MOCK_MULTIMODAL_PIPELINE_TESTS", "").strip().lower()
-    in ("1", "true", "yes"),
-    "SKIP_MOCK_MULTIMODAL_PIPELINE_TESTS=1 — use ::LocalAssignmentGradingTests for real grading.",
-)
-class MultimodalPipelineRunTests(unittest.TestCase):
-    """Core pipeline run with mock runner — no LLM, fast (not assignments_to_grade)."""
-
-    def _run_pipeline(self):
-        env = build_envelope_from_plaintext(
-            assignment_id=_MOCK_STEM, student_id="test_student",
-            plaintext=_SAMPLE_PLAINTEXT,
-            modality_hints={
-                "modality": "notebook",
-                "task_type": "scaffolded_coding",
-                "answer_key_plaintext": "Sample reference: cite evidence from the notebook.",
-            },
-        )
-        cfg = MultimodalGradingConfig(
-            confidence_ai_auto_accept_min=0.5, confidence_ai_caution_min=0.25,
-            score_spread_high=2.0,
-        )
-        runner = MockChunkModelRunner(responses=[
-            _make_sample_json(0.80, confidence_note="Strong evidence."),
-            _make_sample_json(0.75, confidence_note="References reading."),
-        ])
-        pipe = MultimodalGradingPipeline(
-            cfg,
-            runner,
-            rubric_rows_by_type={
-                RubricType.PROGRAMMING_SCAFFOLDED: _SCAFFOLDED_RUBRIC,
-                RubricType.EDA_VISUALIZATION: _EDA_RUBRIC_STUB,
-                RubricType.FREE_RESPONSE: _FREE_RESPONSE_RUBRIC,
-            },
-        )
-        art = PipelineArtifactStore()
-        result = pipe.run(env, artifacts=art)
-        return result, art
-
-    def test_full_run_mock_runner(self) -> None:
-        result, art = self._run_pipeline()
-        self.assertIsNotNone(result.assignment_normalized_score)
-        self.assertTrue(result.chunk_results)
-        for ch in result.chunk_results:
-            self.assertIn("confidence_trace", ch.stage_artifacts)
-        self.assertIn("pipeline_audit", result.stage_artifacts)
-
-    def test_evidence_and_justification_in_result(self) -> None:
-        result, _ = self._run_pipeline()
-        for ch in result.chunk_results:
-            aux = ch.auxiliary or {}
-            self.assertIn("criterion_justifications", aux)
-            self.assertIn("confidence_note", aux)
-
-    def test_assignment_overall_score_is_mean_of_question_overall_scores(self) -> None:
-        result, _ = self._run_pipeline()
-        grading_dict = multimodal_assignment_to_grading_dict(
-            result, rubric=_SCAFFOLDED_RUBRIC
-        )
-        qg = grading_dict.get("question_grades") or []
-        self.assertTrue(qg)
-        scores = [float((x.get("overall") or {}).get("score", 0)) for x in qg]
-        expected = sum(scores) / len(scores)
-        self.assertAlmostEqual(
-            float(grading_dict["overall"]["score"]),
-            expected,
-            places=5,
-        )
-        for x in qg:
-            self.assertNotIn(
-                "normalized_chunk_estimate",
-                x.get("overall") or {},
-            )
+class ChunkGradingPromptJsonTests(unittest.TestCase):
+    """``build_chunk_grading_prompt`` JSON shape (no LLM)."""
 
     def test_chunk_prompt_includes_reference_answer_key(self) -> None:
         ch = GradingChunk(

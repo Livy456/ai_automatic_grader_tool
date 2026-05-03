@@ -30,7 +30,7 @@ embeddings API without frontload) / ``SENTENCE_TRANSFORMERS_MODEL``.
 
 **Blank template (optional):** the pipeline resolves a matching instructor **template file**
 (``.ipynb``, ``.pdf``, ``.docx``, ``.py``, ``.txt``, ``.md``, ``.csv``, ``.xlsx``) via
-:func:`app.grading.blank_assignment_resolve.resolve_blank_assignment_template` under
+:func:`app.grading.answer_key_resolve.resolve_blank_assignment_template` under
 ``modality_hints["blank_assignments_dir"]`` or ``blank_assignments/``, storing bytes in
 ``modality_hints["blank_assignment_template_bytes"]`` and the suffix in
 ``blank_assignment_template_suffix``. When the template is ``.ipynb``, the same bytes are also
@@ -83,7 +83,7 @@ from typing import Any, Callable
 
 from app.config import Config
 from app.grading.answer_key_resolve import resolve_answer_key_plaintext
-from app.grading.blank_assignment_resolve import resolve_blank_assignment_template
+from app.grading.answer_key_resolve import resolve_blank_assignment_template
 from app.grading.llm_router import multimodal_structure_llm_trace_label
 from app.grading.dataset_resolve import attach_dataset_context_for_notebook
 

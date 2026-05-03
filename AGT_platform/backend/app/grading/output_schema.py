@@ -14,10 +14,69 @@ import json
 import logging
 from typing import Any
 
-from app.grading.aggregation import weighted_overall_confidence
 from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
 
 _log = logging.getLogger(__name__)
+
+
+def _criteria_rows_to_arrays_for_weighted(
+    rows: list[dict[str, Any]],
+    *,
+    default_confidence: float = 0.5,
+) -> tuple[list[float], list[float], list[float]]:
+    """Stack weight, score, confidence for each criterion dict (stdlib lists)."""
+    w: list[float] = []
+    s: list[float] = []
+    c: list[float] = []
+    for row in rows:
+        wf: float | None = None
+        wt = row.get("weight")
+        if wt is not None:
+            try:
+                t = float(wt)
+                if t > 0.0:
+                    wf = t
+            except (TypeError, ValueError):
+                pass
+        if wf is None:
+            mp = row.get("max_points")
+            if mp is None:
+                mp = row.get("max_score")
+            try:
+                wf = float(mp) if mp is not None else 0.0
+            except (TypeError, ValueError):
+                wf = 0.0
+        w.append(wf)
+        s.append(float(row.get("score", 0.0)))
+        try:
+            c.append(float(row.get("confidence", default_confidence)))
+        except (TypeError, ValueError):
+            c.append(default_confidence)
+    return w, s, c
+
+
+def _weighted_mean_list(
+    values: list[float],
+    weights: list[float],
+    *,
+    default: float = 0.0,
+) -> float:
+    num = 0.0
+    den = 0.0
+    for vi, wi in zip(values, weights, strict=False):
+        if wi > 0:
+            num += wi * vi
+            den += wi
+    return default if den <= 0 else num / den
+
+
+def weighted_overall_confidence(criteria_results: list[dict[str, Any]]) -> float:
+    """Mean criterion confidence weighted by rubric weights / max_points."""
+    if not criteria_results:
+        return 0.5
+    w, _s, conf = _criteria_rows_to_arrays_for_weighted(criteria_results)
+    mu = _weighted_mean_list(conf, w, default=0.5)
+    return round(mu, 2)
 
 class GradingOutputValidationError(ValueError):
     """Pipeline result does not match the expected grading JSON contract."""
@@ -150,8 +209,8 @@ def _criteria_rows_for_overall_synthesis(criteria: Any) -> list[dict[str, Any]]:
 
 def coerce_grading_output_shape(data: Any) -> dict[str, Any]:
     """
-    Best-effort normalization so locally hosted LLMs (legacy ``grade()`` path) match
-    :func:`validate_grading_output`. Mutates and returns the same dict.
+    Best-effort normalization so grading producers match :func:`validate_grading_output`.
+    Mutates and returns the same dict.
 
     Handles missing or mistyped ``overall`` (scalar, wrong key capitalization, nested
     objects under ``grading`` / ``result``), and synthesizes ``overall`` from
@@ -474,7 +533,7 @@ def validate_grading_output(
     allowed_criterion_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Validate ``run_grading_pipeline`` / task result shape in-place (normalizes some fields).
+    Validate ``run_db_submission_multimodal_pipeline`` / Celery task result shape in-place (normalizes some fields).
 
     Required top-level keys: ``overall`` (dict with ``score``), ``criteria`` (list).
 

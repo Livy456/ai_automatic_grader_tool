@@ -543,7 +543,7 @@ def build_multimodal_grading_chunks(
        ``new_chunking_method.md``).
 
     ``cfg`` may be ``None`` when the pipeline runs without a full application
-    config (e.g. unit tests with a mock runner).  The notebook and heuristic
+    config (e.g. lightweight tests).  The notebook and heuristic
     chunkers operate without it; only LLM QA segmentation is skipped.
     """
     hints = envelope.modality_hints or {}

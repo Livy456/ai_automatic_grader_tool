@@ -13,7 +13,7 @@ from app.grading.rubric_allowlist import (
     match_criterion_name_to_allowlist,
     rubric_rows_to_allowlist,
 )
-from app.grading.rubric_credit_calibration import (
+from app.grading.multimodal.rubric_calibration import (
     anchor_map_monotone_increasing,
     ceiling_half_point_on_grid,
     format_anchor_map_for_log,

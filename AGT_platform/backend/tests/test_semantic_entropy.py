@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.grading.semantic_entropy import (
+from app.grading.multimodal.sample_semantic_entropy import (
     aggregate_grading_json_samples,
     confidence_from_entropy_natural,
     grading_semantic_fingerprint,

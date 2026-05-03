@@ -102,10 +102,5 @@ env.production.gpu
 # Cursor implementation prompt (local only)
 /multi_llm_semantic_entropy.md
 
-# Local venv / rubric factory example output
+# Local venv
 .venv/
-specs/_week4_example_out/
-**/rubric_factory/*
-**/tests/*
-specs/*
-**/custom_rubric/*

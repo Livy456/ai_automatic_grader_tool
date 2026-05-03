@@ -8,7 +8,10 @@ from sqlalchemy.orm import selectinload
 
 from .config import Config
 from .extensions import SessionLocal, engine, init_db
-from .grading.pipelines import run_grading_pipeline, run_standalone_grading_pipeline
+from .grading.multimodal.course_multimodal_runner import (
+    run_db_submission_multimodal_pipeline,
+    run_standalone_multimodal_pipeline,
+)
 from .grading.tools import extract_text_from_pdf
 from .models import (
     AIScore,
@@ -40,6 +43,18 @@ celery_app.conf.task_reject_on_worker_lost = True
 def init_celery(app):
     celery_app.conf.broker_url = app.config["REDIS_URL"]
     celery_app.conf.result_backend = app.config["REDIS_URL"]
+
+
+def _evidence_for_db(ev):
+    if ev is None:
+        return {}
+    if isinstance(ev, dict):
+        return ev
+    return {"text": str(ev)}
+
+
+def _rationale_for_db(c: dict) -> str:
+    return (c.get("rationale") or c.get("justification") or "").strip() or ""
 
 
 def _ensure_db():
@@ -159,15 +174,31 @@ def grade_submission(self, submission_id: int):
                 title=assignment.title,
                 description=merged_desc,
             )
-            result = run_grading_pipeline(
-                cfg,
-                assign_for_prompt,
-                artifacts,
-                rubric_text=merged_rubric,
-                answer_key_text=merged_ak,
-            )
         else:
-            result = run_grading_pipeline(cfg, assignment, artifacts)
+            merged_rubric_parts = []
+            if rubric_ex:
+                merged_rubric_parts.append(
+                    "Rubric (from uploaded file):\n" + rubric_ex.strip()
+                )
+            merged_rubric = "\n\n".join(merged_rubric_parts) if merged_rubric_parts else None
+            merged_ak_parts = []
+            if answer_ex:
+                merged_ak_parts.append(
+                    "Answer key (from uploaded file):\n" + answer_ex.strip()
+                )
+            merged_ak = "\n\n".join(merged_ak_parts) if merged_ak_parts else None
+            assign_for_prompt = assignment
+
+        result = run_db_submission_multimodal_pipeline(
+            cfg,
+            assign_for_prompt,
+            artifacts,
+            submission_id=sub.id,
+            assignment_id=assignment.id,
+            student_id=sub.student_id,
+            rubric_text=merged_rubric,
+            answer_key_text=merged_ak,
+        )
         _default_ml = f"openai:{(cfg.OPENAI_MODEL or 'gpt-4o-mini').strip()}"
         model_used = (result.pop("_model_used", None) or _default_ml)[:200]
         models_used = result.pop("_models_used", [model_used])
@@ -178,6 +209,8 @@ def grade_submission(self, submission_id: int):
         criteria = result.get("criteria", [])
         overall = result.get("overall", {})
         flags = set(result.get("flags", []))
+        mm_review = str(result.get("_assignment_review_status", "") or "").lower()
+        multimodal_needs_review = mm_review in ("caution", "flagged", "escalation")
 
         # Idempotent persistence: delete prior AI scores for this submission then insert
         db.query(AIScore).filter_by(submission_id=sub.id).delete()
@@ -188,8 +221,8 @@ def grade_submission(self, submission_id: int):
                     criterion=c["name"],
                     score=c["score"],
                     confidence=c.get("confidence", 0.5),
-                    rationale=c.get("rationale", ""),
-                    evidence=c.get("evidence", {}),
+                    rationale=_rationale_for_db(c),
+                    evidence=_evidence_for_db(c.get("evidence")),
                     model=model_used,
                 )
             )
@@ -204,7 +237,7 @@ def grade_submission(self, submission_id: int):
                 low_conf = True
         except (TypeError, ValueError):
             pass
-        if low_conf or "needs_review" in flags:
+        if low_conf or "needs_review" in flags or multimodal_needs_review:
             sub.status = "needs_review"
         else:
             sub.status = "graded"
@@ -233,7 +266,7 @@ def grade_submission(self, submission_id: int):
                             "criterion": c.get("name", ""),
                             "score": c.get("score", 0),
                             "confidence": c.get("confidence", 0.5),
-                            "rationale": c.get("rationale", ""),
+                            "rationale": _rationale_for_db(c),
                         }
                         for c in criteria
                     ],
@@ -352,9 +385,10 @@ def grade_standalone_submission(self, submission_id: int):
             if bkey:
                 main[bkey] = data
 
-        result = run_standalone_grading_pipeline(
+        result = run_standalone_multimodal_pipeline(
             cfg,
             main,
+            sub.id,
             sub.title or "Untitled",
             sub.rubric_text,
             sub.answer_key_text,
@@ -372,6 +406,8 @@ def grade_standalone_submission(self, submission_id: int):
         criteria = result.get("criteria", [])
         overall = result.get("overall", {})
         flags = set(result.get("flags", []))
+        mm_review = str(result.get("_assignment_review_status", "") or "").lower()
+        multimodal_needs_review = mm_review in ("caution", "flagged", "escalation")
 
         db.query(StandaloneAIScore).filter_by(submission_id=sub.id).delete()
         for c in criteria:
@@ -381,8 +417,8 @@ def grade_standalone_submission(self, submission_id: int):
                     criterion=c["name"],
                     score=c["score"],
                     confidence=c.get("confidence", 0.5),
-                    rationale=c.get("rationale", ""),
-                    evidence=c.get("evidence", {}),
+                    rationale=_rationale_for_db(c),
+                    evidence=_evidence_for_db(c.get("evidence")),
                     model=model_used,
                 )
             )
@@ -397,7 +433,7 @@ def grade_standalone_submission(self, submission_id: int):
                 low_conf = True
         except (TypeError, ValueError):
             pass
-        if low_conf or "needs_review" in flags:
+        if low_conf or "needs_review" in flags or multimodal_needs_review:
             sub.status = "needs_review"
         else:
             sub.status = "graded"
@@ -428,7 +464,7 @@ def grade_standalone_submission(self, submission_id: int):
                             "criterion": c.get("name", ""),
                             "score": c.get("score", 0),
                             "confidence": c.get("confidence", 0.5),
-                            "rationale": c.get("rationale", ""),
+                            "rationale": _rationale_for_db(c),
                         }
                         for c in criteria
                     ],

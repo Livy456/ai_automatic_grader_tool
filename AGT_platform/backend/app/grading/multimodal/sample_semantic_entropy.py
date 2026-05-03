@@ -1,23 +1,38 @@
 """
-Semantic entropy over stochastic grading samples (fingerprint clustering MVP).
+Semantic entropy over stochastic grading **samples** (fingerprint clustering).
 
-Fingerprint: rounded per-criterion scores + digest of overall summary text.
-Entropy: H = -sum_i p_i log(p_i) (natural log). confidence_from_entropy = exp(-H), clipped to [0, 1].
+Used by tests and optional tooling; multimodal chunk entropy uses
+:mod:`app.grading.multimodal.semantic_confidence` instead.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 
-from .numpy_ops import (
-    confidence_from_entropy,
-    entropy_natural_from_multiset_counts,
-)
+
+def _entropy_natural_from_multiset_counts(counts: Sequence[int], n_total: int) -> float:
+    """Shannon entropy (natural log) for multiset fingerprint counts."""
+    if n_total <= 0 or not counts:
+        return 0.0
+    h = 0.0
+    for c in counts:
+        if c <= 0:
+            continue
+        p = float(c) / float(n_total)
+        h -= p * math.log(p)
+    return float(h)
+
+
+def _confidence_from_entropy(exp_neg_h: float) -> float:
+    """Clip exp(-H) to [0, 1]."""
+    return float(max(0.0, min(1.0, exp_neg_h)))
 
 
 def grading_semantic_fingerprint(sample: dict[str, Any]) -> str:
@@ -58,7 +73,7 @@ def semantic_entropy_natural(fingerprints: list[str]) -> tuple[float, int]:
         return 0.0, 0
     counts = Counter(fingerprints)
     n = len(fingerprints)
-    h = entropy_natural_from_multiset_counts(list(counts.values()), n)
+    h = _entropy_natural_from_multiset_counts(list(counts.values()), n)
     return h, len(counts)
 
 
@@ -67,7 +82,7 @@ def confidence_from_entropy_natural(entropy: float) -> float:
     if entropy <= 0:
         return 1.0
 
-    return confidence_from_entropy(float(np.exp(-entropy)))
+    return _confidence_from_entropy(float(math.exp(-entropy)))
 
 
 def semantic_entropy_by_model(

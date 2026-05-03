@@ -1,4 +1,3 @@
-# I MIGHT END UP MOVING THIS TO MY ROUTES FOLDER!!!
 from __future__ import annotations
 
 import os
@@ -68,31 +67,6 @@ def _save_upload_to_s3(file_storage) -> Tuple[str, str]:
     key = f"ingest/assignment-uploads/{assignment_id}/{filename}"
     upload_from_werkzeug_file(cfg, file_storage, key)
     return assignment_id, key
-
-
-def _grade_stub(assignment: AssignmentUpload) -> Tuple[int, str]:
-    """
-    Synchronous grading placeholder.
-
-    Replace this with your real workflow:
-    - detect modality based on filename or stored mime
-    - extract text / run notebook sandbox / transcribe video, etc.
-    - call your local SLM (e.g., via Ollama)
-    - compute suggested grade + feedback
-    """
-    # Extremely minimal heuristic example:
-    name = (assignment.filename or "").lower()
-    if name.endswith(".ipynb"):
-        return 92, "Notebook executed successfully. Tests passed. Minor style issues."
-    if name.endswith(".py"):
-        return 88, "Python script runs. Core functionality correct; add docstrings and edge-case handling."
-    if name.endswith(".pdf"):
-        return 85, "PDF submission parsed. Good structure; strengthen the argument with citations and clearer conclusions."
-    if name.endswith((".png", ".jpg", ".jpeg", ".webp")):
-        return 90, "Image submission reviewed. Meets rubric criteria; minor improvements suggested in labeling."
-    if name.endswith((".mp4", ".mov", ".webm")):
-        return 87, "Video submission reviewed. Clear explanation; consider adding a brief summary slide at the end."
-    return 80, "Submission received. Basic rubric checks passed. Improve clarity and completeness."
 
 
 def _assignment_to_dict(a: AssignmentUpload) -> Dict[str, Any]:
@@ -203,15 +177,13 @@ def grade_assignment(assignment_id: str):
         a.updated_at = _now()
         db.commit()
 
-        # run grading
-        try:
-            grade, feedback = _grade_stub(a)
-            a.suggested_grade = int(grade)
-            a.feedback = feedback
-            a.status = "graded"
-        except Exception as e:
-            a.status = "failed"
-            a.feedback = f"Grading failed: {e!r}"
+        # Upload-only flow: no autograde here (course submissions use Celery + multimodal pipeline).
+        a.suggested_grade = None
+        a.feedback = (
+            "No automatic grade for this upload endpoint. "
+            "Use course assignment submissions for AI grading."
+        )
+        a.status = "graded"
 
         a.updated_at = _now()
         db.commit()

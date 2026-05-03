@@ -1,5 +1,5 @@
 """
-Protocol for M models × k samples per chunk.
+Protocol for k samples per chunk.
 
 ``MultiModelChunkRunner`` uses :func:`app.grading.llm_router.build_multimodal_grading_clients`
 (OpenAI-only for per-chunk grading) and draws
@@ -24,7 +24,7 @@ ClientBuilder = Callable[[Config], list[tuple[ChatClient, str]]]
 
 
 class ChunkModelRunner(Protocol):
-    """M models × k samples per chunk; returns raw model outputs for parsing + entropy."""
+    """k samples per chunk; returns raw model outputs for parsing + entropy."""
 
     def run_chunk_samples(
         self,
@@ -35,69 +35,10 @@ class ChunkModelRunner(Protocol):
     ) -> list[SampledChunkGrade]: ...
 
 
-_DEFAULT_MOCK_RESPONSE = json.dumps({
-    "rubric_type": "free_response",
-    "criterion_scores": [
-        {
-            "name": "Conceptual Correctness",
-            "score": 3,
-            "max_points": 4,
-            "evidence": "The student wrote: 'Data ethics ensures responsible handling of collected data.'",
-            "reasoning": "The student addresses the core concept of data ethics directly. The response covers responsible handling but lacks depth on specific frameworks. This matches rubric level 3 (mostly accurate with minor gaps). Partial credit: correct topic + clear intent = 3/4.",
-            "justification": "Solid understanding of the core concept with minor gaps.",
-        },
-        {
-            "name": "Evidence & Justification",
-            "score": 2,
-            "max_points": 3,
-            "evidence": "Student cites: 'as discussed in the reading on informed consent'",
-            "reasoning": "The student references the reading material and ties it to informed consent. However, only one example is cited and it lacks specificity. This falls between rubric levels 2 and 3; rounding up for clear effort gives level 2.",
-            "justification": "Two concrete examples cited from the reading; could be more specific.",
-        },
-    ],
-    "criterion_justifications": [
-        "Solid understanding of the core concept with minor gaps.",
-        "Two concrete examples cited from the reading; could be more specific.",
-    ],
-    "total_score": 5,
-    "normalized_score": 0.71,
-    "confidence_note": "Evidence is clear for both criteria.",
-    "review_flag": False,
-})
-
-
-class MockChunkModelRunner:
-    """Deterministic stub for tests."""
-
-    def __init__(self, responses: list[str] | None = None):
-        self._responses = responses or [_DEFAULT_MOCK_RESPONSE]
-
-    def run_chunk_samples(
-        self,
-        chunk: GradingChunk,
-        *,
-        system_prompt: str,
-        user_prompt: str,
-    ) -> list[SampledChunkGrade]:
-        out: list[SampledChunkGrade] = []
-        for i, raw in enumerate(self._responses):
-            out.append(
-                SampledChunkGrade(
-                    model_id="mock",
-                    sample_index=i,
-                    raw_text=raw,
-                    parsed=None,
-                    parse_ok=False,
-                    parse_warnings=[],
-                )
-            )
-        return out
-
-
 class MultiModelChunkRunner:
     """
     For each configured grading client, run ``MULTIMODAL_SAMPLES_PER_MODEL``
-    ``chat_json`` calls (default 5 for a single primary OpenAI model).
+    ``chat_json`` calls (default 3 for a single primary OpenAI model).
 
     Semantic entropy over parsed outcomes is computed in
     :class:`MultimodalGradingPipeline` from cluster assignments of these samples.

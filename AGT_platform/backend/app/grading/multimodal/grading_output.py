@@ -14,7 +14,7 @@ from typing import Any
 from app.grading.consistency_rules import run_rule_checks
 from app.grading.output_schema import finalize_criterion_grading_fields
 from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
-from app.grading.rubric_credit_calibration import snap_half_nearest_display
+from app.grading.multimodal.rubric_calibration import snap_half_nearest_display
 
 from .schemas import AssignmentGradeResult, ChunkGradeOutcome
 

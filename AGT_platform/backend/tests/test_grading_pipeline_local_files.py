@@ -82,7 +82,7 @@ from app.grading.multimodal.ingestion import ingest_raw_submission
 from app.grading.multimodal.schemas import RubricType
 from app.grading.answer_key_resolve import resolve_answer_key_plaintext
 from app.grading.output_schema import validate_grading_output
-from app.grading.pipelines import DEFAULT_STANDALONE_RUBRIC
+from app.grading.multimodal.rubric_fallback import DEFAULT_STANDALONE_RUBRIC
 from app.grading.rag_embeddings import compute_submission_embedding, save_rag_embedding_bundle
 from app.grading.submission_chunks import build_submission_chunks, write_chunks_json
 from app.grading.submission_text import submission_text_from_artifacts
@@ -652,7 +652,7 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                 envelope = ingest_raw_submission(
                     assignment_id=stem,
                     student_id="local_test",
-                    artifacts={k: "<local_fixture>" for k in sorted(artifacts.keys())},
+                    artifacts=dict(artifacts),
                     extracted_plaintext=plain,
                     modality_hints=modality_hints,
                 )

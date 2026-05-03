@@ -3,40 +3,25 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "assignment-parser"
+name = "ai-automatic-grader-tool"
 version = "0.1.0"
-description = "Modality-agnostic assignment parser: extract, segment, classify, render."
+description = "Monorepo: AGT_platform backend (Flask API, Celery, multimodal grading)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "AGT" }]
-dependencies = [
-    "python-docx>=1.0.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.4",
-    "mypy>=1.8",
-]
-
-[project.scripts]
-assignment-parser = "assignment_parser.__main__:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["AGT_platform/backend"]
+include = ["app*"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
-testpaths = ["tests"]
+pythonpath = ["AGT_platform/backend"]
+testpaths = ["AGT_platform/backend/tests"]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 warn_unused_ignores = true
-mypy_path = "src"
-packages = ["assignment_parser", "rubric_factory"]
-
-[[tool.mypy.overrides]]
-module = "docx.*"
-ignore_missing_imports = true
+mypy_path = "AGT_platform/backend"
+packages = ["app"]

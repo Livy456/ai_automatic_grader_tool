@@ -1,4 +1,5 @@
-# Optional stack for MULTIMODAL_LLM_BACKEND=huggingface (local Llama 4 / transformers).
+# Optional PyTorch / transformers stack (e.g. local experiments). Per-chunk multimodal grading
+# uses the OpenAI API only; there is no in-repo Hugging Face chat client wired to Celery.
 # Install in the same venv as the backend, e.g.:
 #   pip install -r requirements.txt -r requirements-huggingface.txt
 torch>=2.2.0
