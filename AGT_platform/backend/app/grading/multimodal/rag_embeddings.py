@@ -261,6 +261,22 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _optional_positive_int_env(name: str) -> int | None:
+    """
+    Read an int env var: unset → ``None`` (caller treats as **no** character cap).
+
+    ``0`` or negative values also mean no cap. Set a positive integer to enforce a limit.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        v = int(raw)
+        return None if v <= 0 else v
+    except (TypeError, ValueError):
+        return None
+
+
 def _chunks_use_openai_trio_rag_frontload(chunks: list[GradingChunk]) -> bool:
     """True when every chunk already has OpenAI-produced trio segment + bundle vectors."""
     if not chunks:
@@ -403,6 +419,9 @@ def refine_chunks_trio_with_structure_llm(chunks: list[GradingChunk], cfg: Confi
 
     Controlled by ``MULTIMODAL_LLM_TRIO_CHUNKING`` / ``cfg.MULTIMODAL_LLM_TRIO_CHUNKING`` and
     :func:`_multimodal_structure_chat_client` (Ollama is not used).
+
+    ``MULTIMODAL_LLM_TRIO_INPUT_MAX_CHARS``: unset or ``0`` = send the full ``extracted_text``
+    to the structure model; set a positive int to cap (clamped up to 2_000_000).
     """
     if not chunks or not multimodal_llm_trio_chunking_enabled(cfg):
         return
@@ -414,11 +433,6 @@ def refine_chunks_trio_with_structure_llm(chunks: list[GradingChunk], cfg: Confi
             "(set ANTHROPIC_API_KEY for Claude or OPENAI_API_KEY for OpenAI structure fallback)"
         )
         return
-    try:
-        cap = int(os.getenv("MULTIMODAL_LLM_TRIO_INPUT_MAX_CHARS", "28000") or 28000)
-    except ValueError:
-        cap = 28_000
-    cap = max(4000, min(cap, 120_000))
     for ch in chunks:
         ev0 = ch.evidence or {}
         if ev0.get("trio_llm_refined"):
@@ -430,7 +444,19 @@ def refine_chunks_trio_with_structure_llm(chunks: list[GradingChunk], cfg: Confi
         raw_in = (ch.extracted_text or "").strip()
         if not raw_in:
             continue
-        user_payload = raw_in[:cap]
+        raw_cap = os.getenv("MULTIMODAL_LLM_TRIO_INPUT_MAX_CHARS", "").strip()
+        if not raw_cap:
+            user_payload = raw_in
+        else:
+            try:
+                cap = int(raw_cap)
+            except ValueError:
+                cap = 28_000
+            if cap <= 0:
+                user_payload = raw_in
+            else:
+                cap = max(4000, min(cap, 2_000_000))
+                user_payload = raw_in[:cap]
         try:
             obj = client.chat_json(
                 [
@@ -461,6 +487,21 @@ def refine_chunks_trio_with_structure_llm(chunks: list[GradingChunk], cfg: Confi
             "instructor_context": ic or str((prev or {}).get("instructor_context") or ""),
             "answer_key_segment": ak_seg,
         }
+        unit = ev0.get("unit") if isinstance(ev0.get("unit"), dict) else {}
+        unit_rt = str(unit.get("response_text") or "").strip()
+        if not str(ev["trio"].get("student_response") or "").strip():
+            if unit_rt:
+                ev["trio"]["student_response"] = unit_rt
+            elif raw_in.strip():
+                pq = str(ev["trio"].get("question") or "").strip()
+                if pq and raw_in.strip().startswith(pq):
+                    tail = raw_in.strip()[len(pq) :].lstrip("\n").strip()
+                    if tail:
+                        ev["trio"]["student_response"] = tail
+                    else:
+                        ev["trio"]["student_response"] = raw_in.strip()
+                else:
+                    ev["trio"]["student_response"] = raw_in.strip()
         joined = "\n\n".join(
             p for p in (ev["trio"]["question"], ev["trio"]["student_response"]) if p
         ).strip()
@@ -620,19 +661,19 @@ def sanitize_evidence_for_grading_prompt(evidence: dict[str, Any]) -> dict[str, 
         elif k in ("_openai_trio_rag_frontload", "_claude_structured_units"):
             continue
         elif k == "trio" and isinstance(v, dict):
-            tq = _env_int("MULTIMODAL_TRIO_PROMPT_QUESTION_MAX_CHARS", 8_000)
-            tr = _env_int("MULTIMODAL_TRIO_PROMPT_RESPONSE_MAX_CHARS", 12_000)
-            ta = _env_int("MULTIMODAL_TRIO_PROMPT_ANSWER_KEY_MAX_CHARS", 12_000)
-            ti = _env_int("MULTIMODAL_TRIO_PROMPT_INSTRUCTOR_MAX_CHARS", 4_000)
+            tq = _optional_positive_int_env("MULTIMODAL_TRIO_PROMPT_QUESTION_MAX_CHARS")
+            tr = _optional_positive_int_env("MULTIMODAL_TRIO_PROMPT_RESPONSE_MAX_CHARS")
+            ta = _optional_positive_int_env("MULTIMODAL_TRIO_PROMPT_ANSWER_KEY_MAX_CHARS")
+            ti = _optional_positive_int_env("MULTIMODAL_TRIO_PROMPT_INSTRUCTOR_MAX_CHARS")
             trd = dict(v)
             q = str(trd.get("question") or "")
             s = str(trd.get("student_response") or "")
             a = str(trd.get("answer_key_segment") or "")
             ic = str(trd.get("instructor_context") or "")
-            trd["question"] = q[:tq] + ("…" if len(q) > tq else "")
-            trd["student_response"] = s[:tr] + ("…" if len(s) > tr else "")
-            trd["answer_key_segment"] = a[:ta] + ("…" if len(a) > ta else "")
-            trd["instructor_context"] = ic[:ti] + ("…" if len(ic) > ti else "")
+            trd["question"] = (q[:tq] + ("…" if len(q) > tq else "")) if tq is not None else q
+            trd["student_response"] = (s[:tr] + ("…" if len(s) > tr else "")) if tr is not None else s
+            trd["answer_key_segment"] = (a[:ta] + ("…" if len(a) > ta else "")) if ta is not None else a
+            trd["instructor_context"] = (ic[:ti] + ("…" if len(ic) > ti else "")) if ti is not None else ic
             out[k] = trd
         else:
             out[k] = v

@@ -25,6 +25,14 @@ from .tools import extract_from_ipynb, extract_text_from_pdf, run_python_tests, 
 
 _log = logging.getLogger(__name__)
 
+# Fallback rubric rows when no course rubric is attached (standalone pipeline, local tests).
+# Shape matches course DB / API rows: ``criterion`` + ``max_score`` (see ``courses.py``).
+DEFAULT_STANDALONE_RUBRIC: tuple[dict[str, Any], ...] = (
+    {"criterion": "Correctness", "max_score": 10.0},
+    {"criterion": "Completeness", "max_score": 10.0},
+    {"criterion": "Clarity and presentation", "max_score": 5.0},
+)
+
 
 def _ensure_submission_artifacts_in_ctx(
     ctx: dict[str, Any], artifacts_bytes: dict[str, bytes]

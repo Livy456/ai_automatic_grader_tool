@@ -1,7 +1,12 @@
 """
 Orchestrator: ingestion → chunking (and optional trio LLM) → answer-key alignment → **per-chunk
-RAG vectorization** (when ``MULTIMODAL_RAG_EMBED_UNITS`` is on) → rubric routing → LLM grading →
-entropy → aggregation → output.
+RAG vectorization** (when ``MULTIMODAL_RAG_EMBED_UNITS`` is on) → **assignment-wide custom rubric
+plan** (``custom_rubric/`` JSON: one generic type + per-question criteria, reused when present) →
+rubric routing → LLM grading → entropy → aggregation → output.
+
+Callers supply ``rubric_rows_by_type`` (e.g. from ``rubric/default.json`` or
+:func:`app.grading.multimodal.generic_rubric_loader.load_four_generic_rubric_rows_by_type`)
+so routing plus custom rubric can choose among scaffolded, free response, EDA, and oral templates.
 
 Chunking uses :func:`app.grading.multimodal.rag_embeddings.build_multimodal_grading_chunks`
 (notebook cell-order, optional LLM QA on PDF-reflowed text, structured Q/A chunking), unless
@@ -88,6 +93,7 @@ from .chunk_cache import (
     load_grading_chunks_cache,
     save_grading_chunks_cache,
 )
+from .custom_rubric_export import apply_custom_rubric_plan_to_chunks
 from .ingestion import IngestionEnvelope, ingest_raw_submission
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
 from .parser import parse_chunk_grade_json
@@ -559,6 +565,18 @@ class MultimodalGradingPipeline:
                 )
                 enrich_chunks_with_rag_embeddings(chunks, app_cfg)
                 rag_embed_ran = True
+
+        if self.rubric_rows_by_type:
+            apply_custom_rubric_plan_to_chunks(
+                chunks,
+                envelope,
+                embed_cfg,
+                self.rubric_rows_by_type,
+                hints if isinstance(hints, dict) else {},
+            )
+            crp = (hints or {}).get("custom_rubric_path") if isinstance(hints, dict) else None
+            if crp:
+                wf("custom_rubric", path=str(crp))
 
         if envelope.artifacts.get("ipynb"):
             attach_dataset_context_for_notebook(envelope, embed_cfg, art)

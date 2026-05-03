@@ -90,8 +90,14 @@ def default_chunker_build_units(
         max_chunk_chars=max_chunk_chars,
     )
     units = build_grading_units_from_chunks(chunks)
-    modality = modality_from_hints(envelope.modality_hints)
-    task = task_type_from_hints(envelope.modality_hints)
+    modality = modality_from_hints(hints)
+    task = task_type_from_hints(hints)
+    arts = envelope.artifacts or {}
+    if arts.get("ipynb") and isinstance(arts.get("ipynb"), (bytes, bytearray)):
+        if modality == Modality.UNKNOWN:
+            modality = Modality.NOTEBOOK
+        if task == TaskType.UNKNOWN:
+            task = TaskType.SCAFFOLDED_CODING
     out: list[GradingChunk] = []
     for i, u in enumerate(units, start=1):
         # Stable 1-based labels for outputs/APIs; original segmentation pair_id is kept
@@ -104,12 +110,19 @@ def default_chunker_build_units(
         extracted = "\n\n".join(p for p in text_parts if str(p).strip()).strip()
         qt = str(u.get("question_text") or "").strip()
         rt = str(u.get("response_text") or "").strip()
+        if not rt and extracted:
+            if qt and extracted.startswith(qt):
+                tail = extracted[len(qt) :].lstrip("\n").strip()
+                if tail:
+                    rt = tail
+            elif not qt:
+                rt = extracted
         ev = {
             "chunk_ids": u.get("chunk_ids"),
             "unit": u,
             "source_pair_id": u.get("pair_id"),
             "canonical_pair_index": i,
-            "question_text": qt[:2000],
+            "question_text": qt,
             "trio": {
                 "question": qt,
                 "student_response": rt,

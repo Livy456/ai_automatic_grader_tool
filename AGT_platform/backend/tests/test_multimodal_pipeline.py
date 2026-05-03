@@ -12,8 +12,10 @@ a chunking issue.
   synthetic plaintext — **not** ``assignments_to_grade/``. Set
   ``SKIP_MOCK_MULTIMODAL_PIPELINE_TESTS=1`` to skip this class when running the whole module.
 - **Integration — real grading** (``LocalAssignmentGradingTests``): grades **every**
-  assignment under ``assignments_to_grade/`` (grouped by stem) using the real rubric from
-  ``rubric/default.json`` and ``create_multimodal_pipeline_from_app_config`` (no mock runner).
+  assignment under ``assignments_to_grade/`` (grouped by stem) using
+  ``rubric/default.json`` **or**, when that file is absent, the four ``rubric/[Generic] …``
+  JSON files merged for ``rubric_rows_by_type``, via ``create_multimodal_pipeline_from_app_config``
+  (no mock runner).
   By default the **chat / structure LLM** is **OpenAI** (``gpt-5.4-nano``) when
   ``OPENAI_API_KEY`` is set in the environment; otherwise **Hugging Face** Maverick
   (``Llama-4-Maverick-17B-128E-Instruct:fp8``). Set ``MULTIMODAL_INTEGRATION_LLM_BACKEND=huggingface``
@@ -317,12 +319,16 @@ def _build_artifacts(paths: list[Path]) -> dict[str, bytes]:
 
 def _load_rubric_json() -> dict | None:
     path = RUBRIC_DIR / "default.json"
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+    from app.grading.multimodal.generic_rubric_loader import (
+        merge_four_generics_to_sections_document,
+    )
+
+    return merge_four_generics_to_sections_document(RUBRIC_DIR)
 
 
 def _ollama_reachable(cfg: Config) -> bool:
@@ -1827,11 +1833,16 @@ class LocalAssignmentGradingTests(unittest.TestCase):
             _integration_log("SKIP_LOCAL_LLM_TESTS is set → skipping integration class")
             raise unittest.SkipTest("SKIP_LOCAL_LLM_TESTS is set.")
 
-        _integration_log("phase=rubric: load rubric/default.json …")
+        _integration_log("phase=rubric: load rubric (default.json or four [Generic] … files) …")
         cls.rubric_raw = _load_rubric_json()
         if cls.rubric_raw is None:
-            _integration_log("SKIP: rubric/default.json missing or invalid JSON")
-            raise unittest.SkipTest("rubric/default.json not found or invalid.")
+            _integration_log(
+                "SKIP: no rubric/default.json and four [Generic] JSON pack incomplete/missing"
+            )
+            raise unittest.SkipTest(
+                "rubric/default.json not found (or invalid), and the four rubric/[Generic] … "
+                "JSON files are not all present — cannot build rubric_rows_by_type."
+            )
         cls.rubric_by_type = _build_rubric_rows_by_type(cls.rubric_raw)
         cls.rubric_flat = _flat_rubric_from_by_type(cls.rubric_by_type)
         cls.rubric_flat_sectioned = _flatten_sections_rubric(cls.rubric_raw)

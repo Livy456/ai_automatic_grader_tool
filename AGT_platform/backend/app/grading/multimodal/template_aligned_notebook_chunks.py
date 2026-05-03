@@ -182,8 +182,8 @@ def _try_scaffold_blank_student_alignment(
         ext = "\n\n".join(p for p in (q, sr) if p).strip() or (ch.extracted_text or "").strip()
         ev0["chunker"] = "blank_scaffold_aligned_notebook"
         ev0["question_id"] = str(ch.question_id or qid)
-        ev0["question_text"] = str(ev0.get("question_text") or q)[:2000]
-        ev0["response_preview"] = str(ev0.get("response_preview") or sr)[:500]
+        ev0["question_text"] = str(ev0.get("question_text") or q)
+        ev0["response_preview"] = str(ev0.get("response_preview") or sr)
         ev0["trio"] = {
             "question": q,
             "student_response": sr,
@@ -280,8 +280,8 @@ def build_blank_template_aligned_notebook_chunks(
         q, sr, ic, ext = _trio_question_student(tch, sch)
         qid = _safe_qid(str(tch.question_id or ""), i)
         cid = f"{aid}:{sid}:template_trio:{i}:{qid}"
-        qtxt = (str((tch.evidence or {}).get("question_text") or q) or "")[:2000]
-        rprev = (sr or "")[:500]
+        qtxt = str((tch.evidence or {}).get("question_text") or q) or ""
+        rprev = sr or ""
         out.append(
             GradingChunk(
                 chunk_id=cid,

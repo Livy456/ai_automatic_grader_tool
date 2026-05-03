@@ -356,10 +356,10 @@ def sanitize_grading_chunks_placeholders(chunks: list[GradingChunk]) -> None:
         ev = dict(ch.evidence or {})
         qt = ev.get("question_text")
         if isinstance(qt, str) and qt.strip():
-            ev["question_text"] = strip_assignment_placeholder_lines(qt)[:2000]
+            ev["question_text"] = strip_assignment_placeholder_lines(qt)
         rp = ev.get("response_preview")
         if isinstance(rp, str) and rp.strip():
-            ev["response_preview"] = strip_assignment_placeholder_lines(rp)[:500]
+            ev["response_preview"] = strip_assignment_placeholder_lines(rp)
         trio = ev.get("trio")
         if isinstance(trio, dict):
             trio = dict(trio)
@@ -651,10 +651,10 @@ def try_build_notebook_scaffold_aligned_chunks(
         trio = _unit_trio_payload(unit)
         qtxt = strip_assignment_placeholder_lines(
             "\n\n".join(unit["question_parts"]).strip()
-        )[:2000]
+        )
         rprev = strip_assignment_placeholder_lines(
             "\n\n".join(unit["response_parts"]).strip()
-        )[:500]
+        )
         out.append(
             GradingChunk(
                 chunk_id=f"{student_id}:{assignment_id}:{qid}:scaffold_{i}",
@@ -893,10 +893,10 @@ def build_notebook_qa_chunks(
         trio = _unit_trio_payload(unit)
         qtxt = strip_assignment_placeholder_lines(
             "\n\n".join(unit["question_parts"]).strip()
-        )[:2000]
+        )
         rprev = strip_assignment_placeholder_lines(
             "\n\n".join(unit["response_parts"]).strip()
-        )[:500]
+        )
         out.append(
             GradingChunk(
                 chunk_id=f"{student_id}:{assignment_id}:{qid}",
@@ -1059,10 +1059,10 @@ def build_notebook_question_boundary_chunks(
         trio = _unit_trio_payload(unit)
         qtxt = strip_assignment_placeholder_lines(
             "\n\n".join(unit["question_parts"]).strip()
-        )[:2000]
+        )
         rprev = strip_assignment_placeholder_lines(
             "\n\n".join(unit["response_parts"]).strip()
-        )[:500]
+        )
         out.append(
             GradingChunk(
                 chunk_id=f"{student_id}:{assignment_id}:{qid}:question_boundary",

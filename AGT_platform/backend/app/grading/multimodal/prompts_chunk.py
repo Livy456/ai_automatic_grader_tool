@@ -5,14 +5,16 @@ Evidence-based chunk grading prompts (system + user skeleton).
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 from .answer_key_chunk_enrich import (
     code_reference_matches_student,
     grading_student_code_blob,
 )
-from .rag_embeddings import sanitize_evidence_for_grading_prompt
+from .rag_embeddings import (
+    _optional_positive_int_env,
+    sanitize_evidence_for_grading_prompt,
+)
 from .schemas import GradingChunk, RubricType
 
 
@@ -138,12 +140,9 @@ def build_chunk_grading_prompt(
     chunk_dict["evidence"] = sanitize_evidence_for_grading_prompt(
         chunk_dict.get("evidence") or {}
     )
-    try:
-        max_chunk = int(os.getenv("MULTIMODAL_CHUNK_PROMPT_MAX_CHARS", "14000").strip() or 14000)
-    except ValueError:
-        max_chunk = 14_000
+    max_chunk = _optional_positive_int_env("MULTIMODAL_CHUNK_PROMPT_MAX_CHARS")
     et = chunk_dict.get("extracted_text") or ""
-    if isinstance(et, str) and len(et) > max_chunk:
+    if max_chunk is not None and isinstance(et, str) and len(et) > max_chunk:
         chunk_dict["extracted_text"] = et[:max_chunk]
         chunk_dict["extracted_text_prompt_capped"] = True
     ak = (answer_key_text or "").strip()

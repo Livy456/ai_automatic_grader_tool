@@ -140,7 +140,6 @@ def narrow_answer_key_snippet_to_student_line(student: str, snippet: str) -> str
 def _normalize_qid(q: str) -> str:
     return re.sub(r"\s+", "", (q or "").strip().lower())
 
-
 def _heading_matches_question_id(heading: str, qid: str) -> bool:
     if not heading or not qid:
         return False
@@ -159,7 +158,7 @@ def _chunk_query_text(ch: GradingChunk) -> str:
     qtxt = str(ev.get("question_text") or "").strip()
     head = "\n".join((ch.extracted_text or "").splitlines()[:12]).strip()
     parts = [str(ch.question_id or "").strip(), qtxt, head]
-    return "\n\n".join(p for p in parts if p).strip() or (ch.extracted_text or "").strip()[:2000]
+    return "\n\n".join(p for p in parts if p).strip() or (ch.extracted_text or "").strip()
 
 
 def _pick_section_for_chunk(

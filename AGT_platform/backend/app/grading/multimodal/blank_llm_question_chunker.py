@@ -73,8 +73,9 @@ def _questions_from_blank_llm(plain: str, cfg: Config) -> list[dict[str, str]]:
     client, model = _rag._multimodal_structure_chat_client(cfg, purpose="trio")
     if client is None:
         return []
-    cap = 28_000
-    user = (plain or "").strip()[:cap]
+    plain_stripped = (plain or "").strip()
+    cap = _rag._optional_positive_int_env("MULTIMODAL_BLANK_LLM_PLAIN_MAX_CHARS")
+    user = plain_stripped if cap is None else plain_stripped[:cap]
     if len(user) < 20:
         return []
     try:
@@ -209,7 +210,7 @@ def try_build_llm_blank_aligned_notebook_chunks(
             if not sr:
                 sr = (sch.extracted_text or "").strip()
         ext = "\n\n".join(p for p in (qtext, sr) if p).strip() or qtext
-        cid = f"{aid}:{sid}:template_trio:{i}:{qid_safe}"[:500]
+        cid = f"{aid}:{sid}:template_trio:{i}:{qid_safe}"
         out.append(
             GradingChunk(
                 chunk_id=cid,
@@ -222,8 +223,8 @@ def try_build_llm_blank_aligned_notebook_chunks(
                 evidence={
                     "chunker": "blank_llm_question_aligned_notebook",
                     "question_id": raw_qid[:200],
-                    "question_text": qtext[:2000],
-                    "response_preview": (sr or "")[:500],
+                    "question_text": qtext,
+                    "response_preview": sr or "",
                     "trio": {
                         "question": qtext,
                         "student_response": sr,

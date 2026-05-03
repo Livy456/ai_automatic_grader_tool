@@ -307,7 +307,7 @@ def try_build_llm_triplet_three_source_chunks(
         if not q and not sr:
             continue
         qid = _safe_qid(str(u.get("question_id") or ""), i)
-        cid = f"{aid}:{sid}:llm_triplet:{i}:{qid}"[:500]
+        cid = f"{aid}:{sid}:llm_triplet:{i}:{qid}"
         out.append(
             GradingChunk(
                 chunk_id=cid,
@@ -327,8 +327,8 @@ def try_build_llm_triplet_three_source_chunks(
                     },
                     "_llm_triplet_three_source": True,
                     "llm_triplet_three_source_model": model_label,
-                    "question_text": q[:8000],
-                    "response_preview": (sr or "")[:2000],
+                    "question_text": q,
+                    "response_preview": sr or "",
                 },
             )
         )

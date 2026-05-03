@@ -118,9 +118,17 @@ def route_rubric(
     """
     rows_map = rubric_rows_by_type or {}
     ipynb = _chunk_is_ipynb_submission(chunk)
-    if chunk.rubric_type is not None and chunk.rubric_rows:
-        chunk.routing_reason = "instructor_override"
-        return chunk
+    rr = str(chunk.routing_reason or "")
+    if chunk.rubric_type is not None:
+        if chunk.rubric_rows:
+            return chunk
+        # Custom plan: name resolution can yield [] while type is fixed — refill full template.
+        if rr.startswith("custom_rubric"):
+            full = list(rows_map.get(chunk.rubric_type, []))
+            if full:
+                chunk.rubric_rows = full
+                return chunk
+            return chunk
 
     key = (chunk.modality, chunk.task_type)
     if key in _DETERMINISTIC:

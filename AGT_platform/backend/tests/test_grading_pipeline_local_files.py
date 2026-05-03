@@ -4,24 +4,29 @@ Integration test: grade local fixtures from the repository root.
 Layout (at repo root, next to ``AGT_platform/``):
 
 - ``assignments_to_grade/`` — submission files (any supported modality; grouped by shared basename).
-- ``rubric/`` — **either** a single generic rubric **or** per-assignment rubrics.
+- ``rubric/`` — **either** (a) four ``[Generic] *.json`` templates (scaffolded coding, free response,
+  open-ended EDA, mock interview), **or** (b) legacy ``default`` / ``generic`` / ``rubric`` basenames,
+  **or** (c) per-assignment ``rubric/<stem>.{json,md,txt}``.
 - ``multi-modal_assignments_to_grade/`` — multimodal pipeline JSON as
   ``<basename>_grade_output.json``.
 - ``multi-modal_RAG_embeding/`` — per-assignment chunk JSON and RAG embedding bundles
   (same filenames as before: ``<stem>_chunks.json``, ``<stem>_embedding.json``, etc.).
 
-**Generic rubric (grades all assignments):** the first match wins, in order:
+**Four generic files (preferred for multimodal):** when all of these exist under ``rubric/``,
+the pipeline receives a full ``rubric_rows_by_type`` map and assignment-wide
+``apply_custom_rubric_plan_to_chunks`` + per-chunk ``route_rubric`` select one template:
 
-1. ``rubric/default.{json,md,txt}``
-2. ``rubric/generic.{json,md,txt}``
-3. ``rubric/rubric.{json,md,txt}``
+- ``[Generic] Scaffolded Coding Rubric.json``
+- ``[Generic] Free Response Rubric.json``
+- ``[Generic] Open-Ended EDA Rubric.json``
+- ``[Generic] Mock Interview.json`` (combined MEng-style file; oral criteria come from the
+  ``Mock Interview / Oral Assessment`` section).
 
-Use one basename only (e.g. only ``default.json`` + optional ``default.md``). JSON defines
-criteria rows; ``.md`` / ``.txt`` with the same basename add ``rubric_text``. Prose-only
-generic files use :data:`DEFAULT_STANDALONE_RUBRIC` as row templates.
+**Legacy generic rubric:** ``rubric/default.{json,md,txt}``, ``rubric/generic.*``, or
+``rubric/rubric.*`` — first match wins (same as before).
 
-**Per-assignment rubric (fallback):** if no generic files exist, use
-``rubric/<assignment_basename>.{json,md,txt}`` as before.
+**Per-assignment rubric (fallback):** ``rubric/<assignment_basename>.{json,md,txt}`` when no
+four-pack and no legacy generic.
 
 Grading uses :class:`app.grading.multimodal.MultimodalGradingPipeline` with
 :class:`app.grading.multimodal.MultiModelChunkRunner` (``MULTIMODAL_SAMPLES_PER_MODEL`` /
@@ -66,6 +71,12 @@ from app.grading.modality_resolution import resolve_modality_profile
 from app.grading.multimodal import (
     create_multimodal_pipeline_from_app_config,
     multimodal_assignment_to_grading_dict,
+)
+from app.grading.multimodal.generic_rubric_loader import (
+    flat_rubric_rows_from_by_type,
+    four_generic_rubric_files_present,
+    load_four_generic_rubric_rows_by_type,
+    merge_four_generics_to_sections_document,
 )
 from app.grading.multimodal.ingestion import ingest_raw_submission
 from app.grading.multimodal.schemas import RubricType
@@ -487,12 +498,17 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
             )
 
         generic_rubric = _try_load_generic_rubric()
-        if generic_rubric is None and not any(
-            _rubric_files_exist_for_stem(stem) for stem in groups
+        four_by_type = load_four_generic_rubric_rows_by_type(RUBRIC_DIR)
+        has_four_pack = four_generic_rubric_files_present(RUBRIC_DIR)
+        if (
+            generic_rubric is None
+            and not any(_rubric_files_exist_for_stem(stem) for stem in groups)
+            and not has_four_pack
         ):
             self.skipTest(
-                "Add a generic rubric (rubric/default.json or generic.md, etc.) "
-                "or per-assignment rubric files under rubric/."
+                "Add all four rubric/[Generic] … JSON files (scaffolded, free response, EDA, "
+                "mock interview), or rubric/default.json (or generic.* / rubric.*), or "
+                f"per-assignment rubric/<stem>.json under {RUBRIC_DIR}."
             )
 
         max_assign = _multimodal_local_test_max_assignments()
@@ -521,14 +537,23 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
             with self.subTest(assignment=stem):
                 if generic_rubric is not None:
                     rubric_list, rubric_text = generic_rubric
-                else:
-                    if not _rubric_files_exist_for_stem(stem):
-                        self.fail(
-                            f"No generic rubric and missing per-assignment rubric for "
-                            f"{stem!r}: add rubric/{stem}.json (and optionally .md/.txt), "
-                            f"or add rubric/default.json (or generic.* / rubric.*) for all."
-                        )
+                elif _rubric_files_exist_for_stem(stem):
                     rubric_list, rubric_text = _load_rubric_for_stem(stem)
+                elif has_four_pack:
+                    rubric_list = flat_rubric_rows_from_by_type(four_by_type)
+                    merged = merge_four_generics_to_sections_document(RUBRIC_DIR)
+                    instr = (
+                        merged.get("llm_grading_instructions")
+                        if isinstance(merged, dict)
+                        else None
+                    )
+                    rubric_text = str(instr).strip() if isinstance(instr, str) else None
+                else:
+                    self.fail(
+                        "No rubric source for this assignment: add the four [Generic] JSON "
+                        f"files, legacy default/generic/rubric under {RUBRIC_DIR}, or "
+                        f"rubric/{stem}.json."
+                    )
 
                 artifacts = _build_artifacts(paths)
 
@@ -603,6 +628,8 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                 raw_json = _try_load_generic_rubric_raw_json()
                 if raw_json and isinstance(raw_json.get("sections"), list):
                     rubric_rows_by_type = _build_rubric_rows_by_type(raw_json)
+                elif has_four_pack:
+                    rubric_rows_by_type = four_by_type
                 else:
                     rubric_rows_by_type = {RubricType.FREE_RESPONSE: rubric_list}
                 pipeline = create_multimodal_pipeline_from_app_config(

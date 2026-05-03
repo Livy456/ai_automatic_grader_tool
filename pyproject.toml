@@ -35,7 +35,7 @@ python_version = "3.10"
 strict = true
 warn_unused_ignores = true
 mypy_path = "src"
-packages = ["assignment_parser"]
+packages = ["assignment_parser", "rubric_factory"]
 
 [[tool.mypy.overrides]]
 module = "docx.*"
